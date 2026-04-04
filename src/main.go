@@ -584,8 +584,8 @@ func progressBar(pct, width int) string {
 		pct = 100
 	}
 	filled := width * pct / 100
-	return "\033[32m" + strings.Repeat("\u2588", filled) +
-		"\033[90m" + strings.Repeat("\u2591", width-filled) + "\033[0m"
+	return "\033[32m" + strings.Repeat("\u25b0", filled) +
+		"\033[90m" + strings.Repeat("\u25b1", width-filled) + "\033[0m"
 }
 
 func fmtBytes(n int64) string {
