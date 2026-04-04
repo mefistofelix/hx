@@ -1,5 +1,10 @@
 # hx — HTTP archive extractor
 
+## Agent rules
+
+- Whenever a code or behaviour change is made, always update `README.md` and
+  `CLAUDE.md` in the same commit to keep docs in sync.
+
 ## Purpose
 
 `hx` stream-extracts **tar.gz, zip, 7z, rar** and more over HTTP on the fly —
