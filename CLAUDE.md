@@ -93,12 +93,12 @@ VT100-compatible terminal (Windows Terminal, iTerm2, any modern Linux terminal).
 
 **Download phase** (ZIP temp-file download only — streaming formats skip this):
 ```
-Downloading  [████████████░░░░░░░░░░░░░░░░]   43%  35.6 / 83.0 MB  4.2 MB/s  ETA 11s
+Downloading  [▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱]   43%  35.6 / 83.0 MB  4.2 MB/s  ETA 11s
 ```
 
 **Extraction phase** (all formats):
 ```
-Extracting  go/src/compress/gzip/gunzip.go  [4.2 kB]  file 1,234  22.3 MB extracted  [██░░░░░░░░░░░░ 52% @ 3.1 MB/s]
+Extracting  go/src/compress/gzip/gunzip.go  [4.2 kB]  file 1,234  22.3 MB extracted  [▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 52% @ 3.1 MB/s]
 ```
 
 After extraction:
@@ -111,7 +111,7 @@ Color key:
 - **[warn]** — bold yellow
 - Filename in Extracting line — cyan
 - File count + extracted size — green
-- Download bar (filled) — green, (empty) — dark gray
+- Download bar `▰` (filled) — green, `▱` (empty) — dark gray
 - **done** — bold green; counts — bold; time — dim
 
 ## Supported archive formats

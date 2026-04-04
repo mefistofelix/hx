@@ -60,8 +60,8 @@ done  14970 files  138.2 MB  (4.1s)
 ### ANSI progress mode (default)
 
 ```
-Downloading  [████████████░░░░░░░░░░░░░░░░]   43%  35.6 / 83.0 MB  4.2 MB/s  ETA 11s
-Extracting  go/src/compress/gzip/gunzip.go  [4.2 kB]  file 1,234  22.3 MB extracted  [██░░ 52% @ 3.1 MB/s]
+Downloading  [▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱]   43%  35.6 / 83.0 MB  4.2 MB/s  ETA 11s
+Extracting  go/src/compress/gzip/gunzip.go  [4.2 kB]  file 1,234  22.3 MB extracted  [▰▰▱▱ 52% @ 3.1 MB/s]
 done  14970 files  138.2 MB  (4.1s)
 ```
 
