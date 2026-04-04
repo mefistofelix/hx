@@ -23,7 +23,7 @@ hx [flags] <url> [dest]
 |------|---------|-------------|
 | `-skip N` | `0` | Strip N leading path components from every archive entry |
 | `-symlinks` | off | Extract symbolic links (skipped by default for safety) |
-| `-progress` | off | Rich ANSI progress output: bar, speed, ETA, current file |
+| `-quiet` | off | Plain text output instead of rich ANSI progress |
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
 
 Flags must be placed before `url`.
@@ -40,8 +40,8 @@ hx https://example.com/repo.zip ./out
 # Strip prefix and extract symlinks
 hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
 
-# Rich ANSI progress bar (for interactive terminals)
-hx -progress -skip 1 https://example.com/repo.tar.gz ./out
+# CI / plain text output (no ANSI)
+hx -quiet -skip 1 https://example.com/repo.tar.gz ./out
 
 # Force in-memory ZIP buffer (no temp file on disk)
 hx -no-tempfile https://example.com/repo.zip ./out
@@ -57,7 +57,7 @@ format: tar.gz  32.5 MB
 done  14970 files  138.2 MB  (4.1s)
 ```
 
-### ANSI progress mode (`-progress`)
+### ANSI progress mode (default)
 
 ```
 Downloading  [████████████░░░░░░░░░░░░░░░░]   43%  35.6 / 83.0 MB  4.2 MB/s  ETA 11s

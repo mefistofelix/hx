@@ -22,7 +22,7 @@ hx [flags] <url> [dest]
 |------|---------|-------------|
 | `-skip N` | `0` | Strip N leading path components from every archive entry |
 | `-symlinks` | off | Extract symbolic links (skipped by default for safety) |
-| `-progress` | off | Rich ANSI progress output: bar, speed, ETA, current file (for terminals) |
+| `-quiet` | off | Plain text output instead of rich ANSI progress |
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
 
 Flags must be placed before `url`.
@@ -39,8 +39,8 @@ hx https://example.com/repo.zip ./out
 # Strip prefix and extract symlinks
 hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
 
-# Interactive terminal — rich ANSI progress bar
-hx -progress -skip 1 https://example.com/repo.tar.gz ./out
+# CI / plain text output (no ANSI)
+hx -quiet -skip 1 https://example.com/repo.tar.gz ./out
 
 # Force in-memory ZIP buffer (no temp file on disk)
 hx -no-tempfile https://example.com/repo.zip ./out
@@ -66,7 +66,7 @@ flags that affect the extracted content (`-skip`, `-symlinks`):
 On subsequent invocations with the same `url`, `dest`, `-skip`, and `-symlinks`
 values the tool detects the sentinel, prints `already extracted, skipping`, and
 exits 0 immediately.  Changing any of those flags causes a fresh extraction.
-`-progress` and `-no-tempfile` are intentionally excluded from the sentinel name
+`-quiet` and `-no-tempfile` are intentionally excluded from the sentinel name
 because they do not affect the extracted content.
 
 ## Output
@@ -86,7 +86,7 @@ the download begins:
 [warn] server does not support HTTP Range (no Accept-Ranges: bytes); downloading to temp file /tmp/hx-1234567890.zip
 ```
 
-### ANSI progress mode (-progress)
+### ANSI progress mode (default)
 
 A single line is redrawn in place using `\r\033[2K`.  Colors require a
 VT100-compatible terminal (Windows Terminal, iTerm2, any modern Linux terminal).
@@ -235,5 +235,5 @@ absolute path to `src/`, resolved at build time.
   symlink creation requires Developer Mode or elevated privileges.
 - **CGO_ENABLED=0** produces a fully static binary with no libc dependency.
 - **Done-file sentinel** encodes only `-skip` and `-symlinks` (flags that affect
-  extracted content).  `-progress` and `-no-tempfile` are excluded so changing
+  extracted content).  `-quiet` and `-no-tempfile` are excluded so changing
   the output mode does not invalidate a previously completed extraction.

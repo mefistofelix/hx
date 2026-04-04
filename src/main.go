@@ -21,7 +21,7 @@ import (
 func main() {
 	skip       := flag.Int("skip", 0, "strip N leading path components from each archive entry")
 	symlinks   := flag.Bool("symlinks", false, "extract symbolic links (skipped by default for safety)")
-	doProgress := flag.Bool("progress", false, "rich ANSI progress: bar, speed, ETA, current file (for terminals)")
+	quiet      := flag.Bool("quiet", false, "plain text output instead of rich ANSI progress")
 	noTempFile := flag.Bool("no-tempfile", false, "buffer non-Range ZIP in memory instead of a temp file")
 
 	flag.Usage = func() {
@@ -70,7 +70,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	pr := newPrinter(*doProgress)
+	pr := newPrinter(!*quiet)
 	_, err = run(rawURL, dest, *skip, *symlinks, !*noTempFile, pr)
 	pr.commit()
 	if err != nil {
