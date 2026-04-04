@@ -1,6 +1,6 @@
 # hx
 
-A statically compiled, zero-dependency CLI tool that downloads and extracts archives over HTTP — no temporary file is written to disk for streaming formats. Drop it into any CI pipeline or bootstrap script on any platform.
+Stream-extract **tar.gz, zip, 7z, rar** and more over HTTP on the fly — optionally strip leading path segments, zero dependencies, statically compiled. Drop it into any CI pipeline or bootstrap script on any platform.
 
 ## Install
 

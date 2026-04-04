@@ -2,9 +2,9 @@
 
 ## Purpose
 
-`hx` is a statically compiled, zero-dependency CLI tool that downloads and
-extracts archives over HTTP — no temporary file is written to disk for
-streaming formats.  It is designed to be dropped into any CI pipeline or
+`hx` stream-extracts **tar.gz, zip, 7z, rar** and more over HTTP on the fly —
+optionally stripping leading path segments, with zero dependencies and a
+statically compiled binary.  Designed to be dropped into any CI pipeline or
 bootstrap script on any platform.
 
 ## Usage
