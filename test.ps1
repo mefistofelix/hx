@@ -41,7 +41,7 @@ $PRED = @{
     '03' = 30   # small zip: codeload no Range, but archive is <1 MB so in-memory is fine
     '04' = 10   # idempotency: stat + done-file check only
     '05' = 30   # alpine tgz: symlinks skipped, runtime + gzip
-    '06' = 25   # alpine tgz -symlinks: Windows privilege error fast path
+    '06' = 25   # alpine tgz -symlinks 1: Windows privilege error fast path
     '07' = 40   # KEY: 200 MB uncompressed src files, streaming keeps peak flat (~28 MB observed)
     '08' = 50   # KEY: 83 MB zip via Range; only central directory + active file in memory (~29 MB observed)
 }
@@ -156,21 +156,21 @@ $results = [System.Collections.Generic.List[object]]::new()
 $results.Add((Run-Test '01 small tgz skip=0'        '01' @($URL_SMALL_TGZ, "$TMP\t01") "$TMP\t01"))
 
 # 02 - small tar.gz, skip=1, wrapper stripped
-$results.Add((Run-Test '02 small tgz skip=1'        '02' @('-skip','1',$URL_SMALL_TGZ,"$TMP\t02") "$TMP\t02"))
+$results.Add((Run-Test '02 small tgz skip=1'        '02' @('-strip','1',$URL_SMALL_TGZ,"$TMP\t02") "$TMP\t02"))
 
 # 03 - small zip, skip=1 via HTTP Range (codeload.github.com supports Accept-Ranges)
-$results.Add((Run-Test '03 small zip  skip=1 Range' '03' @('-skip','1',$URL_SMALL_ZIP,"$TMP\t03") "$TMP\t03"))
+$results.Add((Run-Test '03 small zip  skip=1 Range' '03' @('-strip','1',$URL_SMALL_ZIP,"$TMP\t03") "$TMP\t03"))
 
 # 04 - idempotency: same URL+dest+flags as test 02; must say "already extracted"
-$r04 = Run-Test '04 idempotency' '04' @('-skip','1',$URL_SMALL_TGZ,"$TMP\t02") "$TMP\t02" -NoClean
+$r04 = Run-Test '04 idempotency' '04' @('-strip','1',$URL_SMALL_TGZ,"$TMP\t02") "$TMP\t02" -NoClean
 $r04.Pass = $r04.Output -like '*already extracted*'
 $results.Add($r04)
 
 # 05 - alpine minirootfs, -symlinks NOT set; symlinks must be skipped
 $results.Add((Run-Test '05 alpine tgz no-symlinks'  '05' @($URL_SYM_TGZ,"$TMP\t05") "$TMP\t05"))
 
-# 06 - alpine minirootfs, -symlinks set; on Windows needs Developer Mode
-$r06 = Run-Test '06 alpine tgz -symlinks'           '06' @('-symlinks',$URL_SYM_TGZ,"$TMP\t06") "$TMP\t06"
+# 06 - alpine minirootfs, -symlinks 1; on Windows needs Developer Mode
+$r06 = Run-Test '06 alpine tgz -symlinks 1'         '06' @('-symlinks','1',$URL_SYM_TGZ,"$TMP\t06") "$TMP\t06"
 if (-not $r06.Pass -and $r06.Output -match 'privilege|require') {
     $r06.Output = '[expected on Windows without Dev Mode] ' + $r06.Output
     $r06.Pass   = $true
@@ -179,11 +179,11 @@ $results.Add($r06)
 
 # 07 - KEY: large tar.gz ~30 MB compressed / ~200 MB uncompressed
 #      streaming must keep peak memory well below archive size
-$results.Add((Run-Test '07 large tgz 30MB stream'   '07' @('-skip','1',$URL_LARGE_TGZ,"$TMP\t07") "$TMP\t07"))
+$results.Add((Run-Test '07 large tgz 30MB stream'   '07' @('-strip','1',$URL_LARGE_TGZ,"$TMP\t07") "$TMP\t07"))
 
 # 08 - KEY: large zip ~68 MB via HTTP Range (go.dev supports Accept-Ranges)
 #      only central directory + active file in memory, not the full 68 MB
-$results.Add((Run-Test '08 large zip 68MB Range'    '08' @('-skip','1',$URL_LARGE_ZIP,"$TMP\t08") "$TMP\t08"))
+$results.Add((Run-Test '08 large zip 68MB Range'    '08' @('-strip','1',$URL_LARGE_ZIP,"$TMP\t08") "$TMP\t08"))
 
 # -- Results table ------------------------------------------------------------
 $w = 30

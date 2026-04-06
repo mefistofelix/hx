@@ -140,14 +140,30 @@ const (
 )
 
 func main() {
-	skip := flag.Int("skip", 0, "strip N leading path components from each archive entry")
-	symlinks := flag.Bool("symlinks", false, "extract symbolic links (skipped by default for safety)")
-	quiet := flag.Bool("quiet", false, "plain text output instead of rich ANSI progress")
-	downloadOnly := flag.Bool("download-only", false, "download/copy the original source without extracting it")
-	noTempFile := flag.Bool("no-tempfile", false, "buffer non-Range ZIP in memory instead of a temp file")
-	platform := flag.String("platform", defaultDockerPlatform(), "platform for registry images (for example linux/amd64)")
-	registry := flag.String("registry", "", "override registry/repository base for docker, nuget, winget, pypi, npm, apt, rpm, or apk sources")
-	target := flag.String("target", "", "repository-specific target selector such as bionic, v3.22, 42, or net8.0")
+	var strip int
+	var symlinks bool
+	var quiet bool
+	var downloadOnly bool
+	var noTempFile bool
+	var platform string
+	var registry string
+	var target string
+
+	flag.IntVar(&strip, "strip", 0, "strip N leading path components from each archive entry")
+	flag.IntVar(&strip, "skip", 0, "alias for -strip")
+	registerBool01("symlinks", &symlinks, "extract symbolic links (0/1, skipped by default for safety)")
+	registerBool01("quiet", &quiet, "plain text output instead of rich ANSI progress (0/1)")
+	registerBool01("q", &quiet, "alias for -quiet")
+	registerBool01("download-only", &downloadOnly, "download/copy the original source without extracting it (0/1)")
+	registerBool01("do", &downloadOnly, "alias for -download-only")
+	registerBool01("notmp", &noTempFile, "buffer non-Range ZIP in memory instead of a temp file (0/1)")
+	registerBool01("no-tempfile", &noTempFile, "alias for -notmp")
+	flag.StringVar(&platform, "platform", defaultDockerPlatform(), "platform for registry images (for example linux/amd64)")
+	flag.StringVar(&platform, "plat", defaultDockerPlatform(), "alias for -platform")
+	flag.StringVar(&registry, "registry", "", "override registry/repository base for docker, nuget, winget, pypi, npm, apt, rpm, or apk sources")
+	flag.StringVar(&registry, "reg", "", "alias for -registry")
+	flag.StringVar(&target, "target", "", "repository-specific target selector such as bionic, v3.22, 42, or net8.0")
+	flag.StringVar(&target, "t", "", "alias for -target")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
@@ -172,7 +188,7 @@ func main() {
 		dest = args[1]
 	}
 
-	src, err := resolveInputSource(sourceArg, *registry, *target)
+	src, err := resolveInputSource(sourceArg, registry, target)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot resolve source: %v\n", err)
 		os.Exit(1)
@@ -185,12 +201,12 @@ func main() {
 	}
 	dest = absDest
 
-	if *skip < 0 {
-		fmt.Fprintln(os.Stderr, "-skip must be a non-negative integer")
+	if strip < 0 {
+		fmt.Fprintln(os.Stderr, "-strip must be a non-negative integer")
 		os.Exit(1)
 	}
 
-	doneFile := filepath.Join(dest, doneFileName(src.id, *skip, *symlinks, *downloadOnly, platformKey(src, *platform)))
+	doneFile := filepath.Join(dest, doneFileName(src.id, strip, symlinks, downloadOnly, platformKey(src, platform)))
 	if _, err := os.Stat(doneFile); err == nil {
 		fmt.Println("already extracted, skipping")
 		return
@@ -201,8 +217,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	pr := newPrinter(!*quiet)
-	_, err = run(src, dest, *skip, *symlinks, *downloadOnly, !*noTempFile, *platform, pr)
+	pr := newPrinter(!quiet)
+	_, err = run(src, dest, strip, symlinks, downloadOnly, !noTempFile, platform, pr)
 	pr.commit()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "extraction failed: %v\n", err)
@@ -232,6 +248,41 @@ type printer struct {
 }
 
 const renderInterval = 100 * time.Millisecond
+
+type bool01Value struct {
+	target *bool
+}
+
+func (b *bool01Value) String() string {
+	if b == nil || b.target == nil || !*b.target {
+		return "0"
+	}
+	return "1"
+}
+
+func (b *bool01Value) Set(s string) error {
+	if b == nil || b.target == nil {
+		return fmt.Errorf("bool flag target is nil")
+	}
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "1", "true", "t", "yes", "y", "on":
+		*b.target = true
+		return nil
+	case "0", "false", "f", "no", "n", "off":
+		*b.target = false
+		return nil
+	default:
+		return fmt.Errorf("invalid boolean value %q, expected 0 or 1", s)
+	}
+}
+
+func (b *bool01Value) IsBoolFlag() bool {
+	return true
+}
+
+func registerBool01(name string, target *bool, usage string) {
+	flag.Var(&bool01Value{target: target}, name, usage)
+}
 
 func newPrinter(ansi bool) *printer {
 	return &printer{ansi: ansi, start: time.Now(), dlTotal: -1, lastSize: -1}
@@ -503,7 +554,7 @@ func runLocal(src inputSource, dest string, skip int, symlinks, downloadOnly boo
 
 func runGit(src inputSource, dest string, symlinks, downloadOnly bool, pr *printer) (int, error) {
 	if downloadOnly {
-		return 0, fmt.Errorf("-download-only is not supported for git sources")
+		return 0, fmt.Errorf("-download-only/-do is not supported for git sources")
 	}
 
 	ctx := context.Background()
@@ -2091,7 +2142,7 @@ func detectLatestAPTDist(baseURL string) (string, error) {
 		return "", err
 	}
 	if len(dists) == 0 {
-		return "", fmt.Errorf("could not detect latest apt release from %s; specify it via -registry ...#<release>", baseURL)
+		return "", fmt.Errorf("could not detect latest apt release from %s; specify it via -t <target>", baseURL)
 	}
 	return dists[0], nil
 }
@@ -2123,7 +2174,7 @@ func listAPTDistsByReleaseDate(client *http.Client, baseURL string) ([]string, e
 		dated = append(dated, datedDist{name: name, date: t})
 	}
 	if len(dated) == 0 {
-		return nil, fmt.Errorf("could not detect latest apt release from %s; specify it via -registry ...#<release>", baseURL)
+		return nil, fmt.Errorf("could not detect latest apt release from %s; specify it via -t <target>", baseURL)
 	}
 	for i := 0; i < len(dated)-1; i++ {
 		for j := i + 1; j < len(dated); j++ {
@@ -3254,7 +3305,7 @@ func extractRemoteZip(
 	}
 
 	pr.warn(fmt.Sprintf(
-		"server does not support HTTP Range (%s); buffering archive in memory (-no-tempfile set)",
+		"server does not support HTTP Range (%s); buffering archive in memory (-notmp set)",
 		reason))
 	data, err := io.ReadAll(fallback)
 	if err != nil {

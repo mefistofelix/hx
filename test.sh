@@ -62,7 +62,7 @@ PRED_MB['02']=30   # small tgz skip=1: same
 PRED_MB['03']=30   # small zip: codeload no Range, but archive is <1 MB so trivial
 PRED_MB['04']=10   # idempotency: stat + done-file check only
 PRED_MB['05']=30   # alpine tgz: symlinks skipped, runtime + gzip
-PRED_MB['06']=25   # alpine tgz -symlinks: symlinks extracted on Linux
+PRED_MB['06']=25   # alpine tgz -symlinks 1: symlinks extracted on Linux
 PRED_MB['07']=40   # KEY: 200 MB uncompressed src files, streaming keeps peak flat (~28 MB observed)
 PRED_MB['08']=50   # KEY: 83 MB zip via Range; only central directory + active file in memory
 
@@ -146,13 +146,13 @@ echo ''
 run_test '01 small tgz skip=0'        '01' "$URL_SMALL_TGZ"    "$TMP/01"
 
 # 02 small tar.gz skip=1  (wrapper stripped)
-run_test '02 small tgz skip=1'        '02' -skip 1 "$URL_SMALL_TGZ" "$TMP/02"
+run_test '02 small tgz skip=1'        '02' -strip 1 "$URL_SMALL_TGZ" "$TMP/02"
 
 # 03 small zip skip=1 via Accept-Ranges
-run_test '03 small zip  skip=1 Range' '03' -skip 1 "$URL_SMALL_ZIP" "$TMP/03"
+run_test '03 small zip  skip=1 Range' '03' -strip 1 "$URL_SMALL_ZIP" "$TMP/03"
 
 # 04 idempotency — repeat test 02 with same dest; must say "already extracted"
-run_test '04 idempotency'             '04' -skip 1 "$URL_SMALL_TGZ" "$TMP/02"
+run_test '04 idempotency'             '04' -strip 1 "$URL_SMALL_TGZ" "$TMP/02"
 # patch pass: must say "already extracted"
 if echo "${T_OUT[-1]}" | grep -q 'already extracted'; then
     T_PASS[-1]=1; T_EXIT[-1]=0
@@ -163,16 +163,16 @@ fi
 # 05 alpine minirootfs, symlinks disabled (default)
 run_test '05 alpine tgz no-symlinks'  '05' "$URL_SYM_TGZ"      "$TMP/05"
 
-# 06 alpine minirootfs, -symlinks enabled (symlinks extracted on Linux)
-run_test '06 alpine tgz -symlinks'    '06' -symlinks "$URL_SYM_TGZ" "$TMP/06"
+# 06 alpine minirootfs, -symlinks 1 (symlinks extracted on Linux)
+run_test '06 alpine tgz -symlinks 1'  '06' -symlinks 1 "$URL_SYM_TGZ" "$TMP/06"
 
 # 07 KEY: large tar.gz ~30 MB compressed / ~200 MB uncompressed
 #    streaming must keep peak memory << archive size
-run_test '07 large tgz 30MB stream'   '07' -skip 1 "$URL_LARGE_TGZ" "$TMP/07"
+run_test '07 large tgz 30MB stream'   '07' -strip 1 "$URL_LARGE_TGZ" "$TMP/07"
 
 # 08 KEY: large zip ~68 MB, fetched via HTTP Range (go.dev supports Accept-Ranges)
 #    only central directory + active file in memory, not full 68 MB
-run_test '08 large zip 68MB Range'    '08' -skip 1 "$URL_LARGE_ZIP" "$TMP/08"
+run_test '08 large zip 68MB Range'    '08' -strip 1 "$URL_LARGE_ZIP" "$TMP/08"
 
 # ── Results table ──────────────────────────────────────────────────────────────
 printf '\n%-30s %-6s %-5s %-8s %-14s %-7s %-7s %s\n' \

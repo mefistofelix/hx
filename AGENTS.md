@@ -21,14 +21,14 @@ hx [flags] <source> [dest]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-skip N` | `0` | Strip N leading path components from every archive entry |
-| `-symlinks` | off | Extract symbolic links (skipped by default for safety) |
-| `-quiet` | off | Plain text output instead of rich ANSI progress |
-| `-download-only` | off | Download/copy the original source file without extracting or decompressing it |
-| `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
-| `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images and WinGet installer architecture selection, and the base OS/arch hint for source types that care about platform, for example `linux/amd64` |
-| `-registry VALUE` | auto | Override the registry/repository base for Docker, NuGet, WinGet, PyPI, npm, APT, RPM, or APK sources |
-| `-target VALUE` | auto | Repository-specific target selector such as `bionic`, `v3.22`, `42`, or `net8.0` for source types that support it |
+| `-strip N`, `-skip N` | `0` | Strip N leading path components from every archive entry |
+| `-symlinks 0|1` | `0` | Extract symbolic links when set to `1` (skipped by default for safety) |
+| `-quiet 0|1`, `-q 0|1` | `0` | Plain text output instead of rich ANSI progress |
+| `-download-only 0|1`, `-do 0|1` | `0` | Download/copy the original source file without extracting or decompressing it |
+| `-notmp 0|1`, `-no-tempfile 0|1` | `0` | Buffer non-Range ZIP in memory instead of a temp file |
+| `-platform OS/ARCH[/VARIANT]`, `-plat ...` | `linux/<host-arch>` | Platform selector for Docker registry images and WinGet installer architecture selection, and the base OS/arch hint for source types that care about platform, for example `linux/amd64` |
+| `-registry VALUE`, `-reg VALUE` | auto | Override the registry/repository base for Docker, NuGet, WinGet, PyPI, npm, APT, RPM, or APK sources |
+| `-target VALUE`, `-t VALUE` | auto | Repository-specific target selector such as `bionic`, `v3.22`, `42`, or `net8.0` for source types that support it |
 
 Flags must be placed before `source`.
 
@@ -36,7 +36,7 @@ Flags must be placed before `source`.
 
 ```sh
 # Remote tarball, strip wrapper directory
-hx -skip 1 https://example.com/repo.tar.gz
+hx -strip 1 https://example.com/repo.tar.gz
 
 # Remote zip into ./out
 hx https://example.com/repo.zip ./out
@@ -45,7 +45,7 @@ hx https://example.com/repo.zip ./out
 hx .\downloads\repo.zip ./out
 
 # Local tarball into ./out with wrapper stripped
-hx -skip 1 ./downloads/repo.tar.gz ./out
+hx -strip 1 ./downloads/repo.tar.gz ./out
 
 # Decompress a single gzip file into ./out/file.txt
 hx https://example.com/file.txt.gz ./out
@@ -54,7 +54,7 @@ hx https://example.com/file.txt.gz ./out
 hx https://example.com/tool.exe ./out
 
 # Download an archive without extracting it
-hx -download-only https://example.com/repo.tar.gz ./out
+hx -do 1 https://example.com/repo.tar.gz ./out
 
 # Download the default branch of a Git repo
 hx https://github.com/go-git/go-billy ./out
@@ -68,10 +68,10 @@ hx https://github.com/go-git/go-billy#commit=9d2901ab42b4 ./out
 hx docker://busybox:latest ./out
 
 # Select a specific image platform from a multi-arch image
-hx -platform linux/amd64 docker://registry.k8s.io/pause:3.9 ./out
+hx -plat linux/amd64 docker://registry.k8s.io/pause:3.9 ./out
 
 # Download a container image without applying its layers
-hx -download-only docker://busybox:latest ./out
+hx -do 1 docker://busybox:latest ./out
 
 # Extract the latest npm package tarball
 hx npm://lodash ./out
@@ -81,16 +81,16 @@ hx npm://typescript@5.8.3 ./out
 hx npm://react@next ./out
 
 # Download an npm tarball without extracting it
-hx -download-only npm://@types/node@24.0.0 ./out
+hx -do 1 npm://@types/node@24.0.0 ./out
 
 # Extract an APT package plus all its dependencies
 hx apt://curl ./out
 
 # Pin the APT repository target with -target
-hx -registry "https://archive.ubuntu.com/ubuntu" -target bionic apt://curl ./out
+hx -reg "https://archive.ubuntu.com/ubuntu" -t bionic apt://curl ./out
 
 # Download the resolved .deb files without extracting them
-hx -download-only apt://curl ./out
+hx -do 1 apt://curl ./out
 
 # Extract an RPM package plus its dependencies
 hx rpm://bash ./out
@@ -105,16 +105,16 @@ hx pypi://requests ./out
 hx nuget://Newtonsoft.Json ./out
 
 # Force a specific NuGet target framework group
-hx -target netstandard2.0 nuget://Newtonsoft.Json ./out
+hx -t netstandard2.0 nuget://Newtonsoft.Json ./out
 
 # Download a WinGet installer
 hx winget://Microsoft.VisualStudioCode ./out
 
 # Download the resolved .apk files without extracting them
-hx -download-only apk://curl ./out
+hx -do 1 apk://curl ./out
 
 # Enable symlink extraction
-hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
+hx -strip 1 -symlinks 1 https://example.com/repo.tar.gz ./out
 ```
 
 ## Done-file / idempotency
@@ -136,7 +136,7 @@ After a successful extraction `hx` writes:
 - APK sources use the normalized repository base plus package name/version and selected repository target as the source ID.
 - Git sources use the normalized clone URL plus the selected branch/tag/commit as the source ID.
 - Local sources use the absolute file path as the source ID.
-- `-quiet` and `-no-tempfile` are excluded because they do not affect extracted content.
+- `-quiet`/`-q` and `-notmp` are excluded because they do not affect extracted content.
 - `-download-only` is included because it changes the produced output.
 - Changing `-registry` or `-target` for a source type that uses them produces a different sentinel.
 
@@ -156,7 +156,7 @@ done  14970 files  138.2 MB  (4.1s)
 - Extraction always shows an in-place `Extracting` line when ANSI output is enabled.
 - Single-file compression formats are decompressed into a single output file inside `dest`.
 - Plain non-archive sources are copied into `dest` unchanged.
-- `-download-only` copies the original source file and skips extraction/decompression.
+- `-download-only`/`-do` copies the original source file and skips extraction/decompression.
 - Local archives skip the HTTP download phase and go straight to extraction.
 
 ## Supported archive formats
@@ -206,7 +206,7 @@ For Git sources, `hx` accepts explicit clone URLs such as `https://host/org/repo
 |-----------------|----------|
 | Remote tar-based archives | True streaming from HTTP response through decompressor into file writes |
 | Remote ZIP with `Accept-Ranges` and `Content-Length` | `httpRangeReader` provides `io.ReaderAt`/`io.Seeker` over HTTP 206 requests |
-| Remote ZIP without Range support | Full archive is downloaded to a temp file, or buffered in memory with `-no-tempfile` |
+| Remote ZIP without Range support | Full archive is downloaded to a temp file, or buffered in memory with `-notmp 1` |
 | Single-file compression formats | Decompress the payload and write it as one file in `dest`, usually dropping the compression suffix |
 | Plain files | Copy the source file into `dest` unchanged |
 | Local archives | Source file is opened directly; local ZIP extraction reads from the file itself |
@@ -283,4 +283,4 @@ The test scripts always build `hx` first through `build.ps1` or `build.sh`, so t
 - `-download-only` short-circuits format handling and writes the original source file as-is.
 - HTTPS downloads retry insecurely with a warning if TLS certificate verification fails.
 - The path traversal guard remains based on an absolute destination path.
-- Symlinks remain opt-in via `-symlinks`.
+- Symlinks remain opt-in via `-symlinks 1`.
