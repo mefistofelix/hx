@@ -1,6 +1,6 @@
 # hx
 
-Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, npm packages, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
+Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, npm packages, APT repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
 
 ## Install
 
@@ -16,7 +16,7 @@ hx [flags] <source> [dest]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `npm://` package reference, Git repository URL, or local file path |
+| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `npm://` package reference, `apt://` package reference, Git repository URL, or local file path |
 | `dest` | no | Destination folder; defaults to current directory; created if absent |
 
 | Flag | Default | Description |
@@ -27,6 +27,7 @@ hx [flags] <source> [dest]
 | `-download-only` | off | Download/copy the original source file without extracting or decompressing it |
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
 | `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images, for example `linux/amd64` |
+| `-registry VALUE` | auto | Override the registry/repository base for Docker, npm, or APT sources |
 
 Flags must be placed before `source`.
 
@@ -81,6 +82,15 @@ hx npm://react@next ./out
 # Download an npm tarball without extracting it
 hx -download-only npm://@types/node@24.0.0 ./out
 
+# Extract an APT package plus all its dependencies
+hx apt://curl ./out
+
+# Pin the APT repository/release with -registry
+hx -registry "https://archive.ubuntu.com/ubuntu/#bionic" apt://curl ./out
+
+# Download the resolved .deb files without extracting them
+hx -download-only apt://curl ./out
+
 # Strip prefix and extract symlinks
 hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
 
@@ -117,8 +127,9 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
 - Docker sources are keyed by normalized image reference plus selected platform.
 - npm sources are keyed by package name plus the selected version or dist-tag.
+- APT sources are keyed by package name/version plus the resolved repository release.
 - Local sources are keyed by absolute file path.
-- Changing the source, destination, `-skip`, `-symlinks`, `-download-only`, or Docker `-platform` triggers a fresh extraction/download.
+- Changing the source, destination, `-skip`, `-symlinks`, `-download-only`, `-registry`, or `-platform` triggers a fresh extraction/download.
 
 ## Supported formats
 
@@ -128,16 +139,19 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - **Git repositories** via [go-git](https://github.com/go-git/go-git)
 - **Docker/OCI registry images** fetched directly from the registry HTTP API
 - **npm packages** fetched from the npm registry and resolved to their published tarballs
+- **APT packages** resolved from a repository `Packages` index, including transitive dependencies
 
 Format is auto-detected from magic bytes. If no archive/compression format matches, `hx` falls back to copying the source file into `dest`.
 
 For Git sources, `hx` accepts explicit Git clone URLs such as `https://host/org/repo.git`, plus direct GitHub repository URLs like `https://github.com/org/repo`. GitHub archive/release asset URLs such as `/archive/...zip` still stay on the normal HTTP archive path and are not reinterpreted as Git repositories.
 
-For Docker registry sources, use an explicit `docker://` image reference such as `docker://busybox:latest` or `docker://ghcr.io/org/image:tag`. `hx` talks to the registry API directly and streams layers into `dest` without requiring Docker, Podman, or any other local container runtime.
+For Docker registry sources, use an explicit `docker://` image reference such as `docker://busybox:latest`. Use `-registry` to override the registry host, for example `-registry ghcr.io docker://org/image:tag`. `hx` talks to the registry API directly and streams layers into `dest` without requiring Docker, Podman, or any other local container runtime.
 
 With `-download-only`, Docker registry sources are stored as a simple on-disk layout: `manifest.json` plus the original config/layer blobs under `blobs/<algorithm>/<digest>`, without applying the image filesystem.
 
-For npm sources, use `npm://package`, `npm://package@version`, or `npm://package@dist-tag`. `hx` resolves package metadata from the npm registry, selects the requested version, then downloads the published tarball and handles it like any other remote archive.
+For npm sources, use `npm://package`, `npm://package@version`, or `npm://package@dist-tag`. Use `-registry` to point at a different npm registry base URL. `hx` resolves package metadata from the npm registry, selects the requested version, then downloads the published tarball and handles it like any other remote archive.
+
+For APT sources, use `apt://package` or `apt://package@version`. By default `hx` uses the Ubuntu archive at `https://archive.ubuntu.com/ubuntu` and, if no release is specified, picks the newest release in the repository that actually contains the requested package. Use `-registry` to point at a different APT base URL and optionally pin a release in the fragment, for example `-registry "https://archive.ubuntu.com/ubuntu/#bionic"`. `-platform` supplies the target architecture for APT package resolution.
 
 ## Streaming design
 
@@ -149,8 +163,9 @@ For npm sources, use `npm://package`, `npm://package@version`, or `npm://package
 | Single-file compression (`.gz`, `.xz`, ...) | The stream is decompressed and written as a single output file inside `dest`, usually with the compression suffix removed. |
 | Plain files | If no registered format matches, the source is copied into `dest` without extraction. |
 | Local files | Read directly from disk. Local ZIP archives are extracted from the source file itself, so no HTTP buffering/temp-file fallback is involved. |
-| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For npm packages it downloads the published `.tgz` tarball without extracting it. |
+| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. |
 | npm packages | Package metadata is fetched from the npm registry, a version or dist-tag is resolved, then the published tarball is downloaded and extracted or copied with the normal archive/file pipeline. |
+| APT repositories | The repository `Packages` index is fetched, a package plus its dependencies are resolved, then each `.deb` is downloaded and extracted or copied with the normal archive/file pipeline. |
 | Git repositories | Cloned into a temp directory with `go-git`, then only the checked-out worktree contents are copied into `dest` without leaving a usable `.git` directory behind. Default branch, branch, and tag downloads use a shallow clone; exact commit downloads may fall back to a broader fetch so the requested commit can be checked out. |
 | Docker registry images | The image manifest is fetched from the registry API, the requested platform is selected, and each layer is streamed and applied directly into `dest` without temp files or a local container runtime. With `-download-only`, the selected manifest and original blobs are downloaded instead. |
 

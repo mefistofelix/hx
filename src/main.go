@@ -32,6 +32,7 @@ type inputSource struct {
 	git     *gitSource
 	docker  *dockerSource
 	npm     *npmSource
+	apt     *aptSource
 }
 
 type gitSource struct {
@@ -69,6 +70,19 @@ type npmSource struct {
 	selector string
 }
 
+type aptSource struct {
+	baseURL   string
+	dist      string
+	component string
+	pkg       string
+	version   string
+}
+
+const (
+	defaultNPMRegistry = "https://registry.npmjs.org"
+	defaultAPTRegistry = "https://archive.ubuntu.com/ubuntu"
+)
+
 func main() {
 	skip := flag.Int("skip", 0, "strip N leading path components from each archive entry")
 	symlinks := flag.Bool("symlinks", false, "extract symbolic links (skipped by default for safety)")
@@ -76,11 +90,12 @@ func main() {
 	downloadOnly := flag.Bool("download-only", false, "download/copy the original source without extracting it")
 	noTempFile := flag.Bool("no-tempfile", false, "buffer non-Range ZIP in memory instead of a temp file")
 	platform := flag.String("platform", defaultDockerPlatform(), "platform for registry images (for example linux/amd64)")
+	registry := flag.String("registry", "", "override registry/repository base for docker, npm, or apt sources")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, Git repository URL, or local file path")
+		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, apt:// package reference, Git repository URL, or local file path")
 		fmt.Fprintln(os.Stderr, "  dest  destination folder (default: current directory); created if absent")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "flags:")
@@ -100,7 +115,7 @@ func main() {
 		dest = args[1]
 	}
 
-	src, err := resolveInputSource(sourceArg)
+	src, err := resolveInputSource(sourceArg, *registry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot resolve source: %v\n", err)
 		os.Exit(1)
@@ -287,6 +302,9 @@ func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTemp
 	if src.npm != nil {
 		return runNPM(src, dest, skip, symlinks, downloadOnly, pr)
 	}
+	if src.apt != nil {
+		return runAPT(src, dest, skip, symlinks, downloadOnly, platform, pr)
+	}
 	if src.local {
 		return runLocal(src, dest, skip, symlinks, downloadOnly, pr)
 	}
@@ -456,6 +474,20 @@ type npmDistInfo struct {
 	Tarball string `json:"tarball"`
 }
 
+type aptPackage struct {
+	Package    string
+	Version    string
+	Arch       string
+	Filename   string
+	Depends    string
+	PreDepends string
+}
+
+type aptRepoIndex struct {
+	best map[string]aptPackage
+	all  map[string][]aptPackage
+}
+
 func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
 	platform, err := parsePlatform(platformRaw)
 	if err != nil {
@@ -537,6 +569,44 @@ func runNPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool,
 	return materializeSource(ctx, tarballSrc, dest, skip, symlinks, downloadOnly, true, pr, format, reader, resp.ContentLength, resp, client, nil)
 }
 
+func runAPT(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
+	ctx := context.Background()
+	client := &http.Client{}
+	arch, err := aptArchFromPlatform(platformRaw)
+	if err != nil {
+		return 0, err
+	}
+
+	index, err := fetchAPTIndex(ctx, client, src.apt, arch)
+	if err != nil {
+		return 0, err
+	}
+	root, order, err := resolveAPTDependencies(src.apt, index)
+	if err != nil {
+		return 0, err
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: apt  %s@%s  %s/%s", root.Package, root.Version, src.apt.dist, arch))
+
+	for _, name := range order {
+		pkg := index.best[name]
+		if name == root.Package {
+			pkg = root
+		}
+		if downloadOnly {
+			if err := downloadAPTPackage(ctx, client, src.apt, pkg, dest, pr); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if err := extractAPTPackage(ctx, client, src.apt, pkg, dest, skip, symlinks, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
+}
+
 func resolveNPMVersion(ctx context.Context, client *http.Client, src *npmSource) (npmVersionEntry, error) {
 	u := strings.TrimRight(src.registry, "/") + "/" + url.PathEscape(src.name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -586,6 +656,428 @@ func resolveNPMVersion(ctx context.Context, client *http.Client, src *npmSource)
 		return v, nil
 	}
 	return npmVersionEntry{}, fmt.Errorf("npm version or dist-tag %q not found for %s", selector, src.name)
+}
+
+func fetchAPTIndex(ctx context.Context, client *http.Client, src *aptSource, arch string) (*aptRepoIndex, error) {
+	if src.dist == "" {
+		dists, err := listAPTDistsByReleaseDate(client, src.baseURL)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, dist := range dists {
+			trySrc := *src
+			trySrc.dist = dist
+			index, err := fetchAPTIndex(ctx, client, &trySrc, arch)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if _, ok := index.best[src.pkg]; ok {
+				src.dist = dist
+				return index, nil
+			}
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("apt package %s not found in any release under %s", src.pkg, src.baseURL)
+	}
+
+	index := &aptRepoIndex{
+		best: map[string]aptPackage{},
+		all:  map[string][]aptPackage{},
+	}
+	for _, indexArch := range aptIndexArchitectures(arch) {
+		body, err := fetchAPTIndexBytes(ctx, client, src, indexArch)
+		if err != nil {
+			if indexArch == "all" {
+				continue
+			}
+			return nil, err
+		}
+		entries, err := parseAPTIndex(body, indexArch)
+		if err != nil {
+			return nil, err
+		}
+		for _, pkg := range entries {
+			if pkg.Package == "" || pkg.Filename == "" {
+				continue
+			}
+			index.all[pkg.Package] = append(index.all[pkg.Package], pkg)
+			if _, exists := index.best[pkg.Package]; !exists || pkg.Arch == arch {
+				index.best[pkg.Package] = pkg
+			}
+		}
+	}
+	return index, nil
+}
+
+func selectAPTRoot(src *aptSource, index *aptRepoIndex) (aptPackage, error) {
+	entries := index.all[src.pkg]
+	if len(entries) == 0 {
+		return aptPackage{}, fmt.Errorf("apt package %s not found in repository index", src.pkg)
+	}
+	if src.version == "" {
+		if pkg, ok := index.best[src.pkg]; ok {
+			return pkg, nil
+		}
+		return entries[0], nil
+	}
+	for _, pkg := range entries {
+		if pkg.Version == src.version {
+			return pkg, nil
+		}
+	}
+	return aptPackage{}, fmt.Errorf("apt package %s version %s not found in repository index", src.pkg, src.version)
+}
+
+func fetchAPTIndexBytes(ctx context.Context, client *http.Client, src *aptSource, arch string) ([]byte, error) {
+	candidates := []string{
+		fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.xz", strings.TrimRight(src.baseURL, "/"), src.dist, src.component, arch),
+		fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages.gz", strings.TrimRight(src.baseURL, "/"), src.dist, src.component, arch),
+		fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages", strings.TrimRight(src.baseURL, "/"), src.dist, src.component, arch),
+	}
+	var lastErr error
+	for _, u := range candidates {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", u, err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("apt index request failed for %s: %s", u, resp.Status)
+			resp.Body.Close()
+			continue
+		}
+		defer resp.Body.Close()
+
+		br := bufio.NewReaderSize(resp.Body, 1<<16)
+		format, reader, err := archives.Identify(ctx, filepath.Base(u), br)
+		if err != nil && !errors.Is(err, archives.NoMatch) {
+			return nil, fmt.Errorf("identify apt index: %w", err)
+		}
+		if dec, ok := format.(archives.Decompressor); ok {
+			rc, err := dec.OpenReader(reader)
+			if err != nil {
+				return nil, fmt.Errorf("open apt index decompressor: %w", err)
+			}
+			defer rc.Close()
+			return io.ReadAll(rc)
+		}
+		return io.ReadAll(reader)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no apt Packages index found")
+	}
+	return nil, lastErr
+}
+
+func parseAPTIndex(body []byte, arch string) ([]aptPackage, error) {
+	chunks := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n\n")
+	var out []aptPackage
+	for _, chunk := range chunks {
+		if strings.TrimSpace(chunk) == "" {
+			continue
+		}
+		fields := parseDeb822Fields(chunk)
+		pkg := aptPackage{
+			Package:    fields["Package"],
+			Version:    fields["Version"],
+			Arch:       fields["Architecture"],
+			Filename:   fields["Filename"],
+			Depends:    fields["Depends"],
+			PreDepends: fields["Pre-Depends"],
+		}
+		if pkg.Arch == "" {
+			pkg.Arch = arch
+		}
+		out = append(out, pkg)
+	}
+	return out, nil
+}
+
+func resolveAPTDependencies(src *aptSource, index *aptRepoIndex) (aptPackage, []string, error) {
+	root, err := selectAPTRoot(src, index)
+	if err != nil {
+		return aptPackage{}, nil, err
+	}
+	var order []string
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(string) error
+	visit = func(name string) error {
+		if visited[name] {
+			return nil
+		}
+		if visiting[name] {
+			return nil
+		}
+		pkg, ok := index.best[name]
+		if !ok {
+			return fmt.Errorf("apt dependency %s not found in repository index", name)
+		}
+		visiting[name] = true
+		for _, dep := range parseAPTDepends(pkg.PreDepends, index.best) {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		for _, dep := range parseAPTDepends(pkg.Depends, index.best) {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		visiting[name] = false
+		visited[name] = true
+		order = append(order, name)
+		return nil
+	}
+	if err := visit(root.Package); err != nil {
+		return aptPackage{}, nil, err
+	}
+	return root, order, nil
+}
+
+func parseAPTDepends(raw string, index map[string]aptPackage) []string {
+	var out []string
+	for _, group := range strings.Split(raw, ",") {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		for _, alt := range strings.Split(group, "|") {
+			name := cleanAPTDepName(alt)
+			if name == "" {
+				continue
+			}
+			if _, ok := index[name]; ok {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func cleanAPTDepName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if i := strings.Index(raw, " "); i >= 0 {
+		raw = raw[:i]
+	}
+	if i := strings.Index(raw, "("); i >= 0 {
+		raw = raw[:i]
+	}
+	if i := strings.Index(raw, ":"); i >= 0 {
+		raw = raw[:i]
+	}
+	if i := strings.Index(raw, "["); i >= 0 {
+		raw = raw[:i]
+	}
+	return strings.TrimSpace(raw)
+}
+
+func parseDeb822Fields(chunk string) map[string]string {
+	fields := map[string]string{}
+	var current string
+	for _, line := range strings.Split(chunk, "\n") {
+		if line == "" {
+			continue
+		}
+		if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && current != "" {
+			fields[current] += "\n" + strings.TrimSpace(line)
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		current = strings.TrimSpace(key)
+		fields[current] = strings.TrimSpace(value)
+	}
+	return fields
+}
+
+func aptIndexArchitectures(arch string) []string {
+	if arch == "all" {
+		return []string{"all"}
+	}
+	return []string{arch, "all"}
+}
+
+func detectLatestAPTDist(baseURL string) (string, error) {
+	dists, err := listAPTDistsByReleaseDate(&http.Client{}, baseURL)
+	if err != nil {
+		return "", err
+	}
+	if len(dists) == 0 {
+		return "", fmt.Errorf("could not detect latest apt release from %s; specify it via -registry ...#<release>", baseURL)
+	}
+	return dists[0], nil
+}
+
+func listAPTDistsByReleaseDate(client *http.Client, baseURL string) ([]string, error) {
+	resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/dists/")
+	if err != nil {
+		return nil, fmt.Errorf("apt dists listing request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("apt dists listing request failed: %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read apt dists listing: %w", err)
+	}
+	candidates := parseAPTListingCandidates(string(body))
+	type datedDist struct {
+		name string
+		date time.Time
+	}
+	var dated []datedDist
+	for _, name := range candidates {
+		t, err := fetchAPTReleaseDate(client, baseURL, name)
+		if err != nil {
+			continue
+		}
+		dated = append(dated, datedDist{name: name, date: t})
+	}
+	if len(dated) == 0 {
+		return nil, fmt.Errorf("could not detect latest apt release from %s; specify it via -registry ...#<release>", baseURL)
+	}
+	for i := 0; i < len(dated)-1; i++ {
+		for j := i + 1; j < len(dated); j++ {
+			if dated[j].date.After(dated[i].date) {
+				dated[i], dated[j] = dated[j], dated[i]
+			}
+		}
+	}
+	out := make([]string, 0, len(dated))
+	for _, item := range dated {
+		out = append(out, item.name)
+	}
+	return out, nil
+}
+
+func parseAPTListingCandidates(html string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, part := range strings.Split(html, "href=\"") {
+		if len(part) == len(html) {
+			continue
+		}
+		target, _, _ := strings.Cut(part, "\"")
+		target = strings.Trim(target, "/")
+		if target == "" || strings.Contains(target, "/") || strings.HasPrefix(target, ".") {
+			continue
+		}
+		switch target {
+		case "by-hash", "partial":
+			continue
+		}
+		if !seen[target] {
+			seen[target] = true
+			out = append(out, target)
+		}
+	}
+	return out
+}
+
+func fetchAPTReleaseDate(client *http.Client, baseURL, dist string) (time.Time, error) {
+	resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/dists/" + dist + "/Release")
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return time.Time{}, fmt.Errorf("release request failed: %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return time.Time{}, err
+	}
+	fields := parseDeb822Fields(strings.ReplaceAll(string(body), "\r\n", "\n"))
+	dateValue := fields["Date"]
+	if dateValue == "" {
+		return time.Time{}, fmt.Errorf("release file missing Date")
+	}
+	t, err := time.Parse(time.RFC1123Z, dateValue)
+	if err == nil {
+		return t, nil
+	}
+	t, err = time.Parse("Mon, 02 Jan 2006 15:04:05 MST", dateValue)
+	if err == nil {
+		return t, nil
+	}
+	return time.Time{}, err
+}
+
+func downloadAPTPackage(ctx context.Context, client *http.Client, src *aptSource, pkg aptPackage, dest string, pr *printer) error {
+	resp, err := fetchAPTFile(ctx, client, src, pkg.Filename)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	name := filepath.Base(pkg.Filename)
+	pr.onFile(name, resp.ContentLength)
+	return writeSingleFile(resp.Body, dest, name)
+}
+
+func extractAPTPackage(ctx context.Context, client *http.Client, src *aptSource, pkg aptPackage, dest string, skip int, symlinks bool, pr *printer) error {
+	resp, err := fetchAPTFile(ctx, client, src, pkg.Filename)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return extractDeb(resp.Body, dest, skip, symlinks, pr)
+}
+
+func fetchAPTFile(ctx context.Context, client *http.Client, src *aptSource, filename string) (*http.Response, error) {
+	u := strings.TrimRight(src.baseURL, "/") + "/" + strings.TrimLeft(filename, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("apt package download: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("apt package download failed: %s", resp.Status)
+	}
+	return resp, nil
+}
+
+func extractDeb(r io.Reader, dest string, skip int, symlinks bool, pr *printer) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("read deb: %w", err)
+	}
+	payload, name, err := debDataTar(data)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	br := bufio.NewReaderSize(bytes.NewReader(payload), 1<<16)
+	format, reader, err := archives.Identify(ctx, name, br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return fmt.Errorf("identify deb payload: %w", err)
+	}
+	if format == nil {
+		return fmt.Errorf("deb payload %s is not a supported archive", name)
+	}
+	ex, ok := format.(archives.Extractor)
+	if !ok {
+		return fmt.Errorf("deb payload %s does not support extraction", name)
+	}
+	return ex.Extract(ctx, reader, func(ctx context.Context, f archives.FileInfo) error {
+		return handleEntry(f, dest, skip, symlinks, pr)
+	})
 }
 
 func fetchDockerManifest(ctx context.Context, rc *dockerRegistryClient, reference string, platform platformSpec) (*dockerManifest, []byte, error) {
@@ -1303,8 +1795,19 @@ func formatSizeInfo(size int64) string {
 	return ""
 }
 
-func resolveInputSource(arg string) (inputSource, error) {
-	if ns, ok, err := parseNPMSource(arg); err != nil {
+func resolveInputSource(arg, registry string) (inputSource, error) {
+	if as, ok, err := parseAPTSource(arg, registry); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      aptSourceID(as),
+			hint:    as.pkg + ".deb",
+			apt:     as,
+		}, nil
+	}
+
+	if ns, ok, err := parseNPMSource(arg, registry); err != nil {
 		return inputSource{}, err
 	} else if ok {
 		return inputSource{
@@ -1315,7 +1818,7 @@ func resolveInputSource(arg string) (inputSource, error) {
 		}, nil
 	}
 
-	if ds, ok, err := parseDockerSource(arg); err != nil {
+	if ds, ok, err := parseDockerSource(arg, registry); err != nil {
 		return inputSource{}, err
 	} else if ok {
 		return inputSource{
@@ -1371,7 +1874,7 @@ func isRemoteSource(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
-func parseNPMSource(raw string) (*npmSource, bool, error) {
+func parseNPMSource(raw, registryOverride string) (*npmSource, bool, error) {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "npm:\\") {
 		raw = "npm://" + raw[len("npm:\\"):]
@@ -1399,13 +1902,50 @@ func parseNPMSource(raw string) (*npmSource, bool, error) {
 	}
 
 	return &npmSource{
-		registry: "https://registry.npmjs.org",
+		registry: normalizeNPMRegistry(registryOverride),
 		name:     name,
 		selector: selector,
 	}, true, nil
 }
 
-func parseDockerSource(raw string) (*dockerSource, bool, error) {
+func parseAPTSource(raw, registryOverride string) (*aptSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "apt:\\") {
+		raw = "apt://" + raw[len("apt:\\"):]
+		lower = strings.ToLower(raw)
+	}
+	if !strings.HasPrefix(lower, "apt://") {
+		return nil, false, nil
+	}
+	ref := raw[len("apt://"):]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty apt source")
+	}
+
+	pkg := ref
+	version := ""
+	if i := strings.LastIndex(ref, "@"); i > 0 {
+		pkg = ref[:i]
+		version = ref[i+1:]
+	}
+	if pkg == "" {
+		return nil, false, fmt.Errorf("invalid apt source")
+	}
+
+	baseURL, dist, component, err := resolveAPTRegistry(registryOverride)
+	if err != nil {
+		return nil, false, err
+	}
+	return &aptSource{
+		baseURL:   baseURL,
+		dist:      dist,
+		component: component,
+		pkg:       pkg,
+		version:   version,
+	}, true, nil
+}
+
+func parseDockerSource(raw, registryOverride string) (*dockerSource, bool, error) {
 	lower := strings.ToLower(raw)
 	if !strings.HasPrefix(lower, "docker://") && !strings.HasPrefix(lower, "oci://") {
 		return nil, false, nil
@@ -1440,11 +1980,16 @@ func parseDockerSource(raw string) (*dockerSource, bool, error) {
 		registry = parts[0]
 		repoParts = parts[1:]
 	}
+	if override := normalizeDockerRegistry(registryOverride); override != "" {
+		registry = override
+	}
 	if registry == "" {
 		registry = "registry-1.docker.io"
 		if len(repoParts) == 1 {
 			repoParts = []string{"library", repoParts[0]}
 		}
+	} else if len(repoParts) == 1 && registry == "registry-1.docker.io" {
+		repoParts = []string{"library", repoParts[0]}
 	}
 	repository := strings.Join(repoParts, "/")
 	if repository == "" {
@@ -1686,15 +2231,105 @@ func npmHint(ns *npmSource) string {
 	return base + ".tgz"
 }
 
+func aptSourceID(as *aptSource) string {
+	dist := as.dist
+	if dist == "" {
+		dist = "latest"
+	}
+	if as.version != "" {
+		return fmt.Sprintf("apt://%s@%s#%s?component=%s", as.pkg, as.version, dist, as.component)
+	}
+	return fmt.Sprintf("apt://%s#%s?component=%s", as.pkg, dist, as.component)
+}
+
 func platformKey(src inputSource, raw string) string {
-	if src.docker == nil {
+	if src.docker == nil && src.apt == nil {
 		return ""
 	}
-	p, err := parsePlatform(raw)
+	if src.docker != nil {
+		p, err := parsePlatform(raw)
+		if err != nil {
+			return raw
+		}
+		return p.normalized
+	}
+	arch, err := aptArchFromPlatform(raw)
 	if err != nil {
 		return raw
 	}
-	return p.normalized
+	return arch
+}
+
+func normalizeNPMRegistry(raw string) string {
+	if raw == "" {
+		return defaultNPMRegistry
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	return strings.TrimRight(raw, "/")
+}
+
+func normalizeDockerRegistry(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		if u.Host == "" {
+			return ""
+		}
+		return u.Host
+	}
+	return strings.TrimRight(raw, "/")
+}
+
+func resolveAPTRegistry(raw string) (baseURL, dist, component string, err error) {
+	reg := raw
+	if reg == "" {
+		reg = defaultAPTRegistry
+	}
+	if !strings.Contains(reg, "://") {
+		reg = "https://" + reg
+	}
+	u, err := url.Parse(reg)
+	if err != nil {
+		return "", "", "", err
+	}
+	component = u.Query().Get("component")
+	if component == "" {
+		component = "main"
+	}
+	dist = strings.Trim(u.Fragment, "/")
+	u.RawQuery = ""
+	u.Fragment = ""
+	baseURL = strings.TrimRight(u.String(), "/")
+	return baseURL, dist, component, nil
+}
+
+func aptArchFromPlatform(raw string) (string, error) {
+	p, err := parsePlatform(raw)
+	if err != nil {
+		return "", err
+	}
+	switch p.arch {
+	case "amd64":
+		return "amd64", nil
+	case "386":
+		return "i386", nil
+	case "arm64":
+		return "arm64", nil
+	case "arm":
+		if p.variant == "v5" {
+			return "armel", nil
+		}
+		return "armhf", nil
+	default:
+		return p.arch, nil
+	}
 }
 
 func defaultDockerPlatform() string {
@@ -1861,6 +2496,36 @@ func outPathFromParts(dest string, parts []string) (string, error) {
 		return "", fmt.Errorf("path traversal blocked")
 	}
 	return full, nil
+}
+
+func debDataTar(data []byte) ([]byte, string, error) {
+	if len(data) < 8 || string(data[:8]) != "!<arch>\n" {
+		return nil, "", fmt.Errorf("invalid deb archive")
+	}
+	off := 8
+	for off+60 <= len(data) {
+		hdr := data[off : off+60]
+		name := strings.TrimSpace(string(hdr[:16]))
+		sizeField := strings.TrimSpace(string(hdr[48:58]))
+		var size int
+		if _, err := fmt.Sscanf(sizeField, "%d", &size); err != nil {
+			return nil, "", fmt.Errorf("invalid deb member size")
+		}
+		off += 60
+		if off+size > len(data) {
+			return nil, "", fmt.Errorf("invalid deb member bounds")
+		}
+		member := data[off : off+size]
+		cleanName := strings.TrimSuffix(name, "/")
+		if strings.HasPrefix(cleanName, "data.tar") {
+			return member, cleanName, nil
+		}
+		off += size
+		if off%2 != 0 {
+			off++
+		}
+	}
+	return nil, "", fmt.Errorf("deb archive does not contain data.tar payload")
 }
 
 func newVerifiedReader(r io.ReadCloser, digest string) (io.ReadCloser, func() error, error) {
