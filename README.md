@@ -1,6 +1,6 @@
 # hx
 
-Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
+Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
 
 ## Install
 
@@ -16,7 +16,7 @@ hx [flags] <source> [dest]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `npm://` package reference, `apt://` package reference, `rpm://` package reference, `apk://` package reference, Git repository URL, or local file path |
+| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `pypi://` package reference, `npm://` package reference, `apt://` package reference, `rpm://` package reference, `apk://` package reference, Git repository URL, or local file path |
 | `dest` | no | Destination folder; defaults to current directory; created if absent |
 
 | Flag | Default | Description |
@@ -27,7 +27,7 @@ hx [flags] <source> [dest]
 | `-download-only` | off | Download/copy the original source file without extracting or decompressing it |
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
 | `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images, for example `linux/amd64` |
-| `-registry VALUE` | auto | Override the registry/repository base for Docker, npm, APT, RPM, or APK sources |
+| `-registry VALUE` | auto | Override the registry/repository base for Docker, PyPI, npm, APT, RPM, or APK sources |
 
 Flags must be placed before `source`.
 
@@ -74,6 +74,15 @@ hx -download-only docker://busybox:latest ./out
 
 # Extract the latest npm package tarball
 hx npm://lodash ./out
+
+# Extract the latest PyPI package plus its dependencies
+hx pypi://requests ./out
+
+# Extract a specific PyPI version
+hx pypi://httpx@0.28.1 ./out
+
+# Download the resolved PyPI artifacts without extracting them
+hx -download-only pypi://httpx ./out
 
 # Extract a specific npm version or dist-tag
 hx npm://typescript@5.8.3 ./out
@@ -141,6 +150,7 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - Remote sources are keyed by URL.
 - Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
 - Docker sources are keyed by normalized image reference plus selected platform.
+- PyPI sources are keyed by normalized package name plus the selected version when pinned.
 - npm sources are keyed by package name plus the selected version or dist-tag.
 - APT sources are keyed by package name/version plus the selected repository release selector.
 - RPM sources are keyed by package name/version.
@@ -155,6 +165,7 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - **7-Zip**, **RAR** (read-only), and others via [mholt/archives](https://github.com/mholt/archives)
 - **Git repositories** via [go-git](https://github.com/go-git/go-git)
 - **Docker/OCI registry images** fetched directly from the registry HTTP API
+- **PyPI packages** resolved from the PyPI JSON API, including transitive dependencies from `requires_dist`
 - **npm packages** fetched from the npm registry and resolved to their published tarballs
 - **APT packages** resolved from a repository `Packages` index, including transitive dependencies
 - **RPM packages** resolved from repository metadata, including transitive dependencies
@@ -167,6 +178,8 @@ For Git sources, `hx` accepts explicit Git clone URLs such as `https://host/org/
 For Docker registry sources, use an explicit `docker://` image reference such as `docker://busybox:latest`. Use `-registry` to override the registry host, for example `-registry ghcr.io docker://org/image:tag`. `hx` talks to the registry API directly and streams layers into `dest` without requiring Docker, Podman, or any other local container runtime.
 
 With `-download-only`, Docker registry sources are stored as a simple on-disk layout: `manifest.json` plus the original config/layer blobs under `blobs/<algorithm>/<digest>`, without applying the image filesystem.
+
+For PyPI sources, use `pypi://package` or `pypi://package@version`. By default `hx` uses `https://pypi.org/pypi`. Use `-registry` to point at a different JSON-compatible PyPI registry base. `hx` resolves the selected release, follows `requires_dist` recursively in a conservative way, then prefers a wheel artifact and falls back to an sdist when needed.
 
 For npm sources, use `npm://package`, `npm://package@version`, or `npm://package@dist-tag`. Use `-registry` to point at a different npm registry base URL. `hx` resolves package metadata from the npm registry, selects the requested version, then downloads the published tarball and handles it like any other remote archive.
 
@@ -188,7 +201,8 @@ For HTTPS sources, if certificate verification fails, `hx` emits a warning and r
 | Single-file compression (`.gz`, `.xz`, ...) | The stream is decompressed and written as a single output file inside `dest`, usually with the compression suffix removed. |
 | Plain files | If no registered format matches, the source is copied into `dest` without extraction. |
 | Local files | Read directly from disk. Local ZIP archives are extracted from the source file itself, so no HTTP buffering/temp-file fallback is involved. |
-| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. For RPM and APK sources it downloads the resolved package files without unpacking them. |
+| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For PyPI packages it downloads the resolved wheel/sdist artifacts without extracting them. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. For RPM and APK sources it downloads the resolved package files without unpacking them. |
+| PyPI packages | The PyPI JSON API is fetched for the selected project/release, `requires_dist` is traversed recursively, then each selected wheel or sdist is downloaded and extracted or copied with the normal archive/file pipeline. |
 | npm packages | Package metadata is fetched from the npm registry, a version or dist-tag is resolved, then the published tarball is downloaded and extracted or copied with the normal archive/file pipeline. |
 | APT repositories | The repository `Packages` index is fetched, a package plus its dependencies are resolved, then each `.deb` is downloaded and extracted or copied with the normal archive/file pipeline. |
 | RPM repositories | Repository metadata is fetched from `repomd.xml`, dependencies are resolved from the primary metadata, then each `.rpm` is downloaded and either extracted or copied into `dest`. |

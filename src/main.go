@@ -41,6 +41,7 @@ type inputSource struct {
 	path    string
 	git     *gitSource
 	docker  *dockerSource
+	pypi    *pypiSource
 	npm     *npmSource
 	apt     *aptSource
 	rpm     *rpmSource
@@ -82,6 +83,12 @@ type npmSource struct {
 	selector string
 }
 
+type pypiSource struct {
+	registry string
+	name     string
+	version  string
+}
+
 type aptSource struct {
 	baseURL   string
 	dist      string
@@ -106,9 +113,10 @@ type apkSource struct {
 }
 
 const (
-	defaultNPMRegistry = "https://registry.npmjs.org"
-	defaultAPTRegistry = "https://archive.ubuntu.com/ubuntu"
-	defaultAPKRegistry = "https://dl-cdn.alpinelinux.org/alpine"
+	defaultNPMRegistry  = "https://registry.npmjs.org"
+	defaultPyPIRegistry = "https://pypi.org/pypi"
+	defaultAPTRegistry  = "https://archive.ubuntu.com/ubuntu"
+	defaultAPKRegistry  = "https://dl-cdn.alpinelinux.org/alpine"
 )
 
 func main() {
@@ -118,12 +126,12 @@ func main() {
 	downloadOnly := flag.Bool("download-only", false, "download/copy the original source without extracting it")
 	noTempFile := flag.Bool("no-tempfile", false, "buffer non-Range ZIP in memory instead of a temp file")
 	platform := flag.String("platform", defaultDockerPlatform(), "platform for registry images (for example linux/amd64)")
-	registry := flag.String("registry", "", "override registry/repository base for docker, npm, apt, rpm, or apk sources")
+	registry := flag.String("registry", "", "override registry/repository base for docker, pypi, npm, apt, rpm, or apk sources")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, apt:// package reference, rpm:// package reference, apk:// package reference, Git repository URL, or local file path")
+		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, pypi:// package reference, npm:// package reference, apt:// package reference, rpm:// package reference, apk:// package reference, Git repository URL, or local file path")
 		fmt.Fprintln(os.Stderr, "  dest  destination folder (default: current directory); created if absent")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "flags:")
@@ -386,6 +394,9 @@ func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTemp
 	if src.docker != nil {
 		return runDocker(src, dest, skip, symlinks, downloadOnly, platform, pr)
 	}
+	if src.pypi != nil {
+		return runPyPI(src, dest, skip, symlinks, downloadOnly, pr)
+	}
 	if src.npm != nil {
 		return runNPM(src, dest, skip, symlinks, downloadOnly, pr)
 	}
@@ -567,6 +578,31 @@ type npmDistInfo struct {
 	Tarball string `json:"tarball"`
 }
 
+type pypiProjectResponse struct {
+	Info     pypiProjectInfo              `json:"info"`
+	URLs     []pypiReleaseFile            `json:"urls"`
+	Releases map[string][]pypiReleaseFile `json:"releases"`
+}
+
+type pypiProjectInfo struct {
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	RequiresDist []string `json:"requires_dist"`
+}
+
+type pypiReleaseFile struct {
+	Filename    string `json:"filename"`
+	URL         string `json:"url"`
+	PackageType string `json:"packagetype"`
+}
+
+type pypiResolvedRelease struct {
+	Name         string
+	Version      string
+	RequiresDist []string
+	File         pypiReleaseFile
+}
+
 type aptPackage struct {
 	Package    string
 	Version    string
@@ -691,6 +727,26 @@ func runNPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool,
 		hint:    hint,
 	}
 	return materializeSource(ctx, tarballSrc, dest, skip, symlinks, downloadOnly, true, pr, format, reader, resp.ContentLength, resp, client, nil)
+}
+
+func runPyPI(src inputSource, dest string, skip int, symlinks, downloadOnly bool, pr *printer) (int, error) {
+	ctx := context.Background()
+	client := newHTTPClient(pr)
+
+	root, releases, err := resolvePyPIDependencies(ctx, client, src.pypi)
+	if err != nil {
+		return 0, err
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: pypi  %s@%s", root.Name, root.Version))
+
+	for _, rel := range releases {
+		if err := materializePyPIRelease(ctx, client, src, rel, dest, skip, symlinks, downloadOnly, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
 }
 
 func runAPT(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
@@ -860,6 +916,196 @@ func resolveNPMVersion(ctx context.Context, client *http.Client, src *npmSource)
 		return v, nil
 	}
 	return npmVersionEntry{}, fmt.Errorf("npm version or dist-tag %q not found for %s", selector, src.name)
+}
+
+func resolvePyPIDependencies(ctx context.Context, client *http.Client, src *pypiSource) (pypiResolvedRelease, []pypiResolvedRelease, error) {
+	cache := map[string]pypiResolvedRelease{}
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var order []string
+
+	var visit func(name, version string) error
+	visit = func(name, version string) error {
+		key := normalizePackageName(name)
+		if visited[key] {
+			return nil
+		}
+		if visiting[key] {
+			return nil
+		}
+		rel, ok := cache[key]
+		if !ok || (version != "" && rel.Version != version) {
+			fetched, err := fetchPyPIRelease(ctx, client, &pypiSource{
+				registry: src.registry,
+				name:     name,
+				version:  version,
+			})
+			if err != nil {
+				return err
+			}
+			rel = fetched
+			cache[key] = rel
+		}
+		visiting[key] = true
+		for _, req := range rel.RequiresDist {
+			dep, ok := parsePyPIRequirement(req)
+			if !ok {
+				continue
+			}
+			if err := visit(dep, ""); err != nil {
+				return err
+			}
+		}
+		visiting[key] = false
+		visited[key] = true
+		order = append(order, key)
+		return nil
+	}
+
+	if err := visit(src.name, src.version); err != nil {
+		return pypiResolvedRelease{}, nil, err
+	}
+	root := cache[normalizePackageName(src.name)]
+	releases := make([]pypiResolvedRelease, 0, len(order))
+	for _, key := range order {
+		releases = append(releases, cache[key])
+	}
+	return root, releases, nil
+}
+
+func fetchPyPIRelease(ctx context.Context, client *http.Client, src *pypiSource) (pypiResolvedRelease, error) {
+	metaURL := strings.TrimRight(src.registry, "/") + "/" + url.PathEscape(src.name)
+	if src.version != "" {
+		metaURL += "/" + url.PathEscape(src.version)
+	}
+	metaURL += "/json"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
+	if err != nil {
+		return pypiResolvedRelease{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return pypiResolvedRelease{}, fmt.Errorf("pypi metadata request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return pypiResolvedRelease{}, fmt.Errorf("pypi metadata request failed: %s", resp.Status)
+	}
+
+	var project pypiProjectResponse
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		return pypiResolvedRelease{}, fmt.Errorf("parse pypi metadata: %w", err)
+	}
+	name := project.Info.Name
+	if name == "" {
+		name = src.name
+	}
+	version := project.Info.Version
+	if version == "" {
+		version = src.version
+	}
+	if version == "" {
+		return pypiResolvedRelease{}, fmt.Errorf("pypi project %s does not expose a resolved version", src.name)
+	}
+	files := project.URLs
+	if len(files) == 0 && project.Releases != nil {
+		files = project.Releases[version]
+	}
+	file, err := selectPyPIReleaseFile(files)
+	if err != nil {
+		return pypiResolvedRelease{}, fmt.Errorf("pypi project %s@%s: %w", name, version, err)
+	}
+	return pypiResolvedRelease{
+		Name:         name,
+		Version:      version,
+		RequiresDist: project.Info.RequiresDist,
+		File:         file,
+	}, nil
+}
+
+func materializePyPIRelease(ctx context.Context, client *http.Client, src inputSource, rel pypiResolvedRelease, dest string, skip int, symlinks, downloadOnly bool, pr *printer) error {
+	resp, err := client.Get(rel.File.URL)
+	if err != nil {
+		return fmt.Errorf("pypi artifact download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("pypi artifact download failed: %s", resp.Status)
+	}
+
+	var dlBytes int64
+	tracked := &countReader{
+		r: resp.Body,
+		onRead: func(n int64) {
+			dlBytes += n
+			pr.onDL(dlBytes, resp.ContentLength)
+		},
+	}
+
+	br := bufio.NewReaderSize(tracked, 1<<16)
+	format, reader, err := archives.Identify(ctx, rel.File.Filename, br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return fmt.Errorf("identify pypi artifact: %w", err)
+	}
+
+	artifactSrc := inputSource{
+		display: src.display,
+		id:      src.id,
+		hint:    rel.File.Filename,
+	}
+	if downloadOnly {
+		pr.onFile(rel.File.Filename, resp.ContentLength)
+	}
+	_, err = materializeSource(ctx, artifactSrc, dest, skip, symlinks, downloadOnly, true, pr, format, reader, resp.ContentLength, resp, client, nil)
+	return err
+}
+
+func selectPyPIReleaseFile(files []pypiReleaseFile) (pypiReleaseFile, error) {
+	for _, file := range files {
+		if file.PackageType == "bdist_wheel" && strings.Contains(strings.ToLower(file.Filename), "none-any.whl") {
+			return file, nil
+		}
+	}
+	for _, file := range files {
+		if file.PackageType == "bdist_wheel" {
+			return file, nil
+		}
+	}
+	for _, file := range files {
+		if file.PackageType == "sdist" {
+			return file, nil
+		}
+	}
+	if len(files) == 0 {
+		return pypiReleaseFile{}, fmt.Errorf("no downloadable files found")
+	}
+	return files[0], nil
+}
+
+func parsePyPIRequirement(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	req, marker, _ := strings.Cut(raw, ";")
+	marker = strings.ToLower(marker)
+	if strings.Contains(marker, "extra ==") {
+		return "", false
+	}
+	if i := strings.Index(req, "["); i >= 0 {
+		req = req[:i]
+	}
+	req = strings.TrimSpace(req)
+	if i := strings.IndexAny(req, " (<>=!~"); i >= 0 {
+		req = req[:i]
+	}
+	req = strings.TrimSpace(req)
+	if req == "" {
+		return "", false
+	}
+	return req, true
 }
 
 func fetchAPTIndex(ctx context.Context, client *http.Client, src *aptSource, arch string) (*aptRepoIndex, error) {
@@ -2652,6 +2898,17 @@ func formatSizeInfo(size int64) string {
 }
 
 func resolveInputSource(arg, registry string) (inputSource, error) {
+	if ps, ok, err := parsePyPISource(arg, registry); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      pypiSourceID(ps),
+			hint:    ps.name,
+			pypi:    ps,
+		}, nil
+	}
+
 	if as, ok, err := parseAPKSource(arg, registry); err != nil {
 		return inputSource{}, err
 	} else if ok {
@@ -2750,6 +3007,35 @@ func resolveInputSource(arg, registry string) (inputSource, error) {
 func isRemoteSource(s string) bool {
 	s = strings.ToLower(s)
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func parsePyPISource(raw, registryOverride string) (*pypiSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "pypi:\\") {
+		raw = "pypi://" + raw[len("pypi:\\"):]
+		lower = strings.ToLower(raw)
+	}
+	if !strings.HasPrefix(lower, "pypi://") {
+		return nil, false, nil
+	}
+	ref := raw[len("pypi://"):]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty pypi source")
+	}
+	name := ref
+	version := ""
+	if i := strings.LastIndex(ref, "@"); i > 0 {
+		name = ref[:i]
+		version = ref[i+1:]
+	}
+	if name == "" {
+		return nil, false, fmt.Errorf("invalid pypi source")
+	}
+	return &pypiSource{
+		registry: normalizePyPIRegistry(registryOverride),
+		name:     name,
+		version:  version,
+	}, true, nil
 }
 
 func parseAPKSource(raw, registry string) (*apkSource, bool, error) {
@@ -3158,6 +3444,13 @@ func npmSourceID(ns *npmSource) string {
 	return "npm://" + ns.name + "@" + ns.selector
 }
 
+func pypiSourceID(ps *pypiSource) string {
+	if ps.version == "" {
+		return "pypi://" + normalizePackageName(ps.name)
+	}
+	return "pypi://" + normalizePackageName(ps.name) + "@" + ps.version
+}
+
 func rpmSourceID(rs *rpmSource) string {
 	if rs.version == "" {
 		return "rpm://" + rs.name
@@ -3229,6 +3522,27 @@ func platformKey(src inputSource, raw string) string {
 		return raw
 	}
 	return arch
+}
+
+func normalizePyPIRegistry(raw string) string {
+	if raw == "" {
+		return defaultPyPIRegistry
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return defaultPyPIRegistry
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	path := strings.TrimRight(u.Path, "/")
+	if path == "" {
+		path = "/pypi"
+	}
+	u.Path = path
+	return strings.TrimRight(u.String(), "/")
 }
 
 func normalizeNPMRegistry(raw string) string {
@@ -3583,6 +3897,13 @@ func parseAPKFields(chunk string) map[string]string {
 		fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
 	return fields
+}
+
+func normalizePackageName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.ReplaceAll(name, "_", "-")
+	name = strings.ReplaceAll(name, ".", "-")
+	return name
 }
 
 func parseAPKList(raw string) []string {
