@@ -1,6 +1,6 @@
-# hx
+# hx - universal artifact fetcher and extractor
 
-Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, NuGet packages, WinGet manifests, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
+Fetch and extract **archives, packages, container images, Git repos, and plain files** from HTTP(S) URLs, package registries, container registries, Git repository URLs, or local files. `hx` also handles single-file compression formats like `.gz`, supports download-only mode, and stays dependency-light and CI-friendly.
 
 ## Install
 

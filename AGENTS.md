@@ -1,4 +1,4 @@
-# hx - archive extractor
+# hx - universal artifact fetcher and extractor
 
 ## Agent rules
 
@@ -6,7 +6,7 @@
 
 ## Purpose
 
-`hx` extracts archives from HTTP(S), Docker registry images, NuGet packages, WinGet manifests, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files, supports single-file compression formats like `.gz`, and falls back to copying plain files when the source is not an archive. It can strip leading path segments, skips symlinks by default for safety, and ships as a statically linked binary with no runtime dependencies beyond the standard library plus `mholt/archives`, `go-git`, `go-rpmutils`, and `go.yaml.in/yaml/v4`.
+`hx` fetches and extracts artifacts from HTTP(S) URLs, Docker registry images, NuGet packages, WinGet manifests, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It supports single-file compression formats like `.gz`, can download sources without extracting them, and falls back to copying plain files when the source is not an archive. It can strip leading path segments, skips symlinks by default for safety, and ships as a statically linked binary with no runtime dependencies beyond the standard library plus `mholt/archives`, `go-git`, `go-rpmutils`, and `go.yaml.in/yaml/v4`.
 
 ## Usage
 
