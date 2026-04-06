@@ -20,6 +20,9 @@ get_script_dir() {
 get_script_dir
 ROOT="$REPLY"
 
+# Always build through the repo build script so tests exercise the supported toolchain path.
+"$ROOT/build.sh"
+
 HX="$ROOT/bin/hx"
 TMP="${TMPDIR:-/tmp}/hx-tests-$$"
 rm -rf "$TMP"

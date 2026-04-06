@@ -117,6 +117,7 @@ type rpmSource struct {
 	name     string
 	version  string
 	registry string
+	target   string
 }
 
 type apkSource struct {
@@ -135,6 +136,7 @@ const (
 	defaultPyPIRegistry   = "https://pypi.org/pypi"
 	defaultAPTRegistry    = "https://archive.ubuntu.com/ubuntu"
 	defaultAPKRegistry    = "https://dl-cdn.alpinelinux.org/alpine"
+	defaultRPMRegistry    = "https://mirrors.kernel.org/fedora/releases"
 )
 
 func main() {
@@ -917,7 +919,7 @@ func runRPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool,
 		return 0, err
 	}
 
-	baseURL, err := resolveRPMRegistry(client, src.rpm.registry, arch)
+	baseURL, err := resolveRPMRegistry(client, src.rpm.registry, src.rpm.target, arch)
 	if err != nil {
 		return 0, err
 	}
@@ -3621,8 +3623,8 @@ func formatSizeInfo(size int64) string {
 	return ""
 }
 
-func resolveInputSource(arg, registry string) (inputSource, error) {
-	if ns, ok, err := parseNuGetSource(arg, registry); err != nil {
+func resolveInputSource(arg, registry, target string) (inputSource, error) {
+	if ns, ok, err := parseNuGetSource(arg, registry, target); err != nil {
 		return inputSource{}, err
 	} else if ok {
 		return inputSource{
@@ -3655,7 +3657,7 @@ func resolveInputSource(arg, registry string) (inputSource, error) {
 		}, nil
 	}
 
-	if as, ok, err := parseAPKSource(arg, registry); err != nil {
+	if as, ok, err := parseAPKSource(arg, registry, target); err != nil {
 		return inputSource{}, err
 	} else if ok {
 		return inputSource{
@@ -3666,7 +3668,7 @@ func resolveInputSource(arg, registry string) (inputSource, error) {
 		}, nil
 	}
 
-	if rs, ok, err := parseRPMSource(arg, registry); err != nil {
+	if rs, ok, err := parseRPMSource(arg, registry, target); err != nil {
 		return inputSource{}, err
 	} else if ok {
 		return inputSource{
@@ -3677,7 +3679,7 @@ func resolveInputSource(arg, registry string) (inputSource, error) {
 		}, nil
 	}
 
-	if as, ok, err := parseAPTSource(arg, registry); err != nil {
+	if as, ok, err := parseAPTSource(arg, registry, target); err != nil {
 		return inputSource{}, err
 	} else if ok {
 		return inputSource{
@@ -3755,7 +3757,7 @@ func isRemoteSource(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
-func parseNuGetSource(raw, registryOverride string) (*nugetSource, bool, error) {
+func parseNuGetSource(raw, registryOverride, targetOverride string) (*nugetSource, bool, error) {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "nuget:\\") {
 		raw = "nuget://" + raw[len("nuget:\\"):]
@@ -3777,12 +3779,12 @@ func parseNuGetSource(raw, registryOverride string) (*nugetSource, bool, error) 
 	if name == "" {
 		return nil, false, fmt.Errorf("invalid nuget source")
 	}
-	registry, selector := normalizeNuGetRegistry(registryOverride)
+	registry := normalizeNuGetRegistry(registryOverride)
 	return &nugetSource{
 		registry:    registry,
 		name:        name,
 		version:     version,
-		tfmSelector: selector,
+		tfmSelector: targetOverride,
 	}, true, nil
 }
 
@@ -3844,7 +3846,7 @@ func parsePyPISource(raw, registryOverride string) (*pypiSource, bool, error) {
 	}, true, nil
 }
 
-func parseAPKSource(raw, registry string) (*apkSource, bool, error) {
+func parseAPKSource(raw, registry, targetOverride string) (*apkSource, bool, error) {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "apk:\\") {
 		raw = "apk://" + raw[len("apk:\\"):]
@@ -3866,7 +3868,7 @@ func parseAPKSource(raw, registry string) (*apkSource, bool, error) {
 	if name == "" {
 		return nil, false, fmt.Errorf("invalid apk source")
 	}
-	baseURL, release, component, err := resolveAPKRegistry(registry)
+	baseURL, release, component, err := resolveAPKRegistry(registry, targetOverride)
 	if err != nil {
 		return nil, false, err
 	}
@@ -3880,7 +3882,7 @@ func parseAPKSource(raw, registry string) (*apkSource, bool, error) {
 	}, true, nil
 }
 
-func parseRPMSource(raw, registry string) (*rpmSource, bool, error) {
+func parseRPMSource(raw, registry, targetOverride string) (*rpmSource, bool, error) {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "rpm:\\") {
 		raw = "rpm://" + raw[len("rpm:\\"):]
@@ -3902,7 +3904,7 @@ func parseRPMSource(raw, registry string) (*rpmSource, bool, error) {
 	if name == "" {
 		return nil, false, fmt.Errorf("invalid rpm source")
 	}
-	return &rpmSource{name: name, version: version, registry: registry}, true, nil
+	return &rpmSource{name: name, version: version, registry: registry, target: targetOverride}, true, nil
 }
 
 func parseNPMSource(raw, registryOverride string) (*npmSource, bool, error) {
@@ -3939,7 +3941,7 @@ func parseNPMSource(raw, registryOverride string) (*npmSource, bool, error) {
 	}, true, nil
 }
 
-func parseAPTSource(raw, registryOverride string) (*aptSource, bool, error) {
+func parseAPTSource(raw, registryOverride, targetOverride string) (*aptSource, bool, error) {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "apt:\\") {
 		raw = "apt://" + raw[len("apt:\\"):]
@@ -3963,7 +3965,7 @@ func parseAPTSource(raw, registryOverride string) (*aptSource, bool, error) {
 		return nil, false, fmt.Errorf("invalid apt source")
 	}
 
-	baseURL, dist, component, err := resolveAPTRegistry(registryOverride)
+	baseURL, dist, component, err := resolveAPTRegistry(registryOverride, targetOverride)
 	if err != nil {
 		return nil, false, err
 	}
@@ -4244,42 +4246,51 @@ func dockerSourceID(ds *dockerSource) string {
 }
 
 func npmSourceID(ns *npmSource) string {
+	base := "npm+" + normalizeNPMRegistry(ns.registry) + "://"
 	if ns.selector == "" {
-		return "npm://" + ns.name
+		return base + ns.name
 	}
-	return "npm://" + ns.name + "@" + ns.selector
+	return base + ns.name + "@" + ns.selector
 }
 
 func nugetSourceID(ns *nugetSource) string {
+	base := "nuget+" + normalizeNuGetRegistry(ns.registry) + "://"
 	suffix := ""
 	if ns.tfmSelector != "" {
 		suffix = "#" + normalizeNuGetTFMSelector(ns.tfmSelector)
 	}
 	if ns.version == "" {
-		return "nuget://" + normalizeNuGetPackageName(ns.name) + suffix
+		return base + normalizeNuGetPackageName(ns.name) + suffix
 	}
-	return "nuget://" + normalizeNuGetPackageName(ns.name) + "@" + strings.ToLower(ns.version) + suffix
+	return base + normalizeNuGetPackageName(ns.name) + "@" + strings.ToLower(ns.version) + suffix
 }
 
 func wingetSourceID(ws *wingetSource) string {
+	base := "winget+" + normalizeWingetRegistry(ws.registry) + "://"
 	if ws.version == "" {
-		return "winget://" + strings.ToLower(ws.id)
+		return base + strings.ToLower(ws.id)
 	}
-	return "winget://" + strings.ToLower(ws.id) + "@" + ws.version
+	return base + strings.ToLower(ws.id) + "@" + ws.version
 }
 
 func pypiSourceID(ps *pypiSource) string {
+	base := "pypi+" + normalizePyPIRegistry(ps.registry) + "://"
 	if ps.version == "" {
-		return "pypi://" + normalizePackageName(ps.name)
+		return base + normalizePackageName(ps.name)
 	}
-	return "pypi://" + normalizePackageName(ps.name) + "@" + ps.version
+	return base + normalizePackageName(ps.name) + "@" + ps.version
 }
 
 func rpmSourceID(rs *rpmSource) string {
-	if rs.version == "" {
-		return "rpm://" + rs.name
+	base := "rpm+" + normalizeRPMRegistryID(rs.registry) + "://"
+	suffix := ""
+	if rs.target != "" {
+		suffix = "#" + strings.Trim(rs.target, "/")
 	}
-	return "rpm://" + rs.name + "@" + rs.version
+	if rs.version == "" {
+		return base + rs.name + suffix
+	}
+	return base + rs.name + "@" + rs.version + suffix
 }
 
 func apkSourceID(as *apkSource) string {
@@ -4287,10 +4298,11 @@ func apkSourceID(as *apkSource) string {
 	if release == "" {
 		release = "latest"
 	}
+	base := "apk+" + strings.TrimRight(as.baseURL, "/") + "://"
 	if as.version != "" {
-		return fmt.Sprintf("apk://%s@%s#%s?component=%s", as.name, as.version, release, as.component)
+		return fmt.Sprintf("%s%s@%s#%s?component=%s", base, as.name, as.version, release, as.component)
 	}
-	return fmt.Sprintf("apk://%s#%s?component=%s", as.name, release, as.component)
+	return fmt.Sprintf("%s%s#%s?component=%s", base, as.name, release, as.component)
 }
 
 func npmHint(ns *npmSource) string {
@@ -4310,10 +4322,11 @@ func aptSourceID(as *aptSource) string {
 	if dist == "" {
 		dist = "latest"
 	}
+	base := "apt+" + strings.TrimRight(as.baseURL, "/") + "://"
 	if as.version != "" {
-		return fmt.Sprintf("apt://%s@%s#%s?component=%s", as.pkg, as.version, dist, as.component)
+		return fmt.Sprintf("%s%s@%s#%s?component=%s", base, as.pkg, as.version, dist, as.component)
 	}
-	return fmt.Sprintf("apt://%s#%s?component=%s", as.pkg, dist, as.component)
+	return fmt.Sprintf("%s%s#%s?component=%s", base, as.pkg, dist, as.component)
 }
 
 func platformKey(src inputSource, raw string) string {
@@ -4379,18 +4392,17 @@ func normalizePyPIRegistry(raw string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-func normalizeNuGetRegistry(raw string) (string, string) {
+func normalizeNuGetRegistry(raw string) string {
 	if raw == "" {
-		return defaultNuGetRegistry, ""
+		return defaultNuGetRegistry
 	}
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return defaultNuGetRegistry, ""
+		return defaultNuGetRegistry
 	}
-	selector := u.Fragment
 	u.RawQuery = ""
 	u.Fragment = ""
 	path := strings.TrimRight(u.Path, "/")
@@ -4400,7 +4412,7 @@ func normalizeNuGetRegistry(raw string) (string, string) {
 		path += "/index.json"
 	}
 	u.Path = path
-	return u.String(), selector
+	return u.String()
 }
 
 func normalizeWingetRegistry(raw string) string {
@@ -4460,7 +4472,23 @@ func normalizeDockerRegistry(raw string) string {
 	return strings.TrimRight(raw, "/")
 }
 
-func resolveAPTRegistry(raw string) (baseURL, dist, component string, err error) {
+func normalizeRPMRegistryID(raw string) string {
+	if raw == "" {
+		return defaultRPMRegistry
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return defaultRPMRegistry
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
+}
+
+func resolveAPTRegistry(raw, targetOverride string) (baseURL, dist, component string, err error) {
 	reg := raw
 	if reg == "" {
 		reg = defaultAPTRegistry
@@ -4476,14 +4504,17 @@ func resolveAPTRegistry(raw string) (baseURL, dist, component string, err error)
 	if component == "" {
 		component = "main"
 	}
-	dist = strings.Trim(u.Fragment, "/")
+	dist = ""
+	if targetOverride != "" {
+		dist = strings.Trim(targetOverride, "/")
+	}
 	u.RawQuery = ""
 	u.Fragment = ""
 	baseURL = strings.TrimRight(u.String(), "/")
 	return baseURL, dist, component, nil
 }
 
-func resolveAPKRegistry(raw string) (baseURL, release, component string, err error) {
+func resolveAPKRegistry(raw, targetOverride string) (baseURL, release, component string, err error) {
 	reg := raw
 	if reg == "" {
 		reg = defaultAPKRegistry
@@ -4499,7 +4530,10 @@ func resolveAPKRegistry(raw string) (baseURL, release, component string, err err
 	if component == "" {
 		component = "main"
 	}
-	release = strings.Trim(u.Fragment, "/")
+	release = ""
+	if targetOverride != "" {
+		release = strings.Trim(targetOverride, "/")
+	}
 	u.RawQuery = ""
 	u.Fragment = ""
 	baseURL = strings.TrimRight(u.String(), "/")
@@ -4590,7 +4624,7 @@ func wingetArchFromPlatform(raw string) (string, error) {
 	}
 }
 
-func resolveRPMRegistry(client *http.Client, raw, arch string) (string, error) {
+func resolveRPMRegistry(client *http.Client, raw, target, arch string) (string, error) {
 	if raw != "" {
 		if !strings.Contains(raw, "://") {
 			raw = "https://" + raw
@@ -4602,7 +4636,10 @@ func resolveRPMRegistry(client *http.Client, raw, arch string) (string, error) {
 		if strings.Contains(u.Path, "/repodata") || strings.HasSuffix(u.Path, "/os/") || strings.HasSuffix(u.Path, "/os") {
 			return strings.TrimRight(u.String(), "/"), nil
 		}
-		dist := strings.Trim(u.Fragment, "/")
+		dist := ""
+		if target != "" {
+			dist = strings.Trim(target, "/")
+		}
 		u.Fragment = ""
 		u.RawQuery = ""
 		base := strings.TrimRight(u.String(), "/")
@@ -4610,7 +4647,10 @@ func resolveRPMRegistry(client *http.Client, raw, arch string) (string, error) {
 			return fmt.Sprintf("%s/%s/Everything/%s/os", base, dist, arch), nil
 		}
 	}
-	base := "https://mirrors.kernel.org/fedora/releases"
+	base := defaultRPMRegistry
+	if target != "" {
+		return fmt.Sprintf("%s/%s/Everything/%s/os", base, strings.Trim(target, "/"), arch), nil
+	}
 	rel, err := detectLatestFedoraRelease(client, arch)
 	if err != nil {
 		return "", err

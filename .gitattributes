@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+*.exe binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.rar binary
+*.deb binary
+*.rpm binary
+*.apk binary
+*.nupkg binary
+*.whl binary
+bin/hx binary
+bin/hx.exe binary

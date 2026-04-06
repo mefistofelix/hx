@@ -6,6 +6,10 @@ param()
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+# Always build through the repo build script so tests exercise the supported toolchain path.
+& (Join-Path $PSScriptRoot 'build.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'build.ps1 failed' }
+
 $HX  = Join-Path $PSScriptRoot 'bin\hx.exe'
 $TMP = Join-Path $env:TEMP 'hx-tests'
 Remove-Item $TMP -Recurse -Force -ErrorAction SilentlyContinue

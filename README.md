@@ -28,6 +28,7 @@ hx [flags] <source> [dest]
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
 | `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images and WinGet installer architecture selection, and the base OS/arch hint for source types that care about platform, for example `linux/amd64` |
 | `-registry VALUE` | auto | Override the registry/repository base for Docker, NuGet, WinGet, PyPI, npm, APT, RPM, or APK sources |
+| `-target VALUE` | auto | Repository-specific target selector such as `bionic`, `v3.22`, `42`, or `net8.0` for source types that support it |
 
 Flags must be placed before `source`.
 
@@ -78,6 +79,9 @@ hx nuget://Newtonsoft.Json ./out
 # Extract a specific NuGet version
 hx nuget://Newtonsoft.Json@13.0.3 ./out
 
+# Force a specific NuGet target framework group
+hx -target netstandard2.0 nuget://Newtonsoft.Json ./out
+
 # Download the resolved NuGet packages without extracting them
 hx -download-only nuget://Newtonsoft.Json ./out
 
@@ -112,8 +116,8 @@ hx -download-only npm://@types/node@24.0.0 ./out
 # Extract an APT package plus all its dependencies
 hx apt://curl ./out
 
-# Pin the APT repository/release with -registry
-hx -registry "https://archive.ubuntu.com/ubuntu/#bionic" apt://curl ./out
+# Pin the APT repository target with -target
+hx -registry "https://archive.ubuntu.com/ubuntu" -target bionic apt://curl ./out
 
 # Download the resolved .deb files without extracting them
 hx -download-only apt://curl ./out
@@ -121,14 +125,14 @@ hx -download-only apt://curl ./out
 # Extract an RPM package plus its dependencies
 hx rpm://bash ./out
 
-# Pin the RPM repository/release with -registry
-hx -registry "https://mirrors.kernel.org/fedora/releases#42" rpm://bash ./out
+# Pin the RPM repository target with -target
+hx -registry "https://mirrors.kernel.org/fedora/releases" -target 42 rpm://bash ./out
 
 # Extract an Alpine APK package plus its dependencies
 hx apk://curl ./out
 
-# Pin the Alpine repository/release with -registry
-hx -registry "https://dl-cdn.alpinelinux.org/alpine#v3.22" apk://curl ./out
+# Pin the Alpine repository target with -target
+hx -registry "https://dl-cdn.alpinelinux.org/alpine" -target v3.22 apk://curl ./out
 
 # Download the resolved .apk files without extracting them
 hx -download-only apk://curl ./out
@@ -168,15 +172,16 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - Remote sources are keyed by URL.
 - Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
 - Docker sources are keyed by normalized image reference plus selected platform.
-- NuGet sources are keyed by normalized package name plus the selected version when pinned.
-- WinGet sources are keyed by normalized package identifier plus the selected version when pinned.
-- PyPI sources are keyed by normalized package name plus the selected version when pinned.
-- npm sources are keyed by package name plus the selected version or dist-tag.
-- APT sources are keyed by package name/version plus the selected repository release selector.
-- RPM sources are keyed by package name/version.
-- APK sources are keyed by package name/version plus the selected repository release selector.
+- NuGet sources are keyed by normalized registry, package name, selected version when pinned, and explicit `-target` when set.
+- WinGet sources are keyed by normalized registry plus package identifier and selected version when pinned.
+- PyPI sources are keyed by normalized registry plus package name and selected version when pinned.
+- npm sources are keyed by normalized registry plus package name and selected version or dist-tag.
+- APT sources are keyed by normalized repository base plus package name/version and selected repository target.
+- RPM sources are keyed by normalized repository base plus package name/version and selected repository target when set.
+- APK sources are keyed by normalized repository base plus package name/version and selected repository target.
 - Local sources are keyed by absolute file path.
 - Changing the source, destination, `-skip`, `-symlinks`, `-download-only`, or `-platform` triggers a fresh extraction/download.
+- Changing `-registry` or `-target` for a source type that uses them also triggers a fresh extraction/download.
 
 ## Supported formats
 
@@ -186,11 +191,11 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - **Git repositories** via [go-git](https://github.com/go-git/go-git)
 - **Docker/OCI registry images** fetched directly from the registry HTTP API
 - **NuGet packages** resolved from the NuGet V3 service index and flat container
-- **WinGet packages** resolved from WinGet YAML manifests and downloaded from the referenced installer URLs
+- **WinGet packages** resolved from WinGet YAML manifests parsed with [go.yaml.in/yaml/v4](https://pkg.go.dev/go.yaml.in/yaml/v4) and downloaded from the referenced installer URLs
 - **PyPI packages** resolved from the PyPI JSON API, including transitive dependencies from `requires_dist`
 - **npm packages** fetched from the npm registry and resolved to their published tarballs
 - **APT packages** resolved from a repository `Packages` index, including transitive dependencies
-- **RPM packages** resolved from repository metadata, including transitive dependencies
+- **RPM packages** resolved from repository metadata, including transitive dependencies, with payload extraction via [github.com/sassoftware/go-rpmutils](https://github.com/sassoftware/go-rpmutils)
 - **Alpine APK packages** resolved from `APKINDEX.tar.gz`, including transitive dependencies
 
 Format is auto-detected from magic bytes. If no archive/compression format matches, `hx` falls back to copying the source file into `dest`.
@@ -201,7 +206,7 @@ For Docker registry sources, use an explicit `docker://` image reference such as
 
 With `-download-only`, Docker registry sources are stored as a simple on-disk layout: `manifest.json` plus the original config/layer blobs under `blobs/<algorithm>/<digest>`, without applying the image filesystem.
 
-For NuGet sources, use `nuget://package` or `nuget://package@version`. By default `hx` uses the NuGet V3 service index at `https://api.nuget.org/v3/index.json`. Use `-registry` to point at a different NuGet V3 service index, and optionally use the registry fragment to force a target framework selector such as `#net8.0`, `#netstandard2.0`, or `#dotnetcore`. `-platform` remains an OS/arch selector and is not used to encode the .NET framework version. `hx` resolves the latest version from the flat container when needed, selects the most appropriate dependency group from the package `.nuspec`, then downloads the `.nupkg` files and extracts them like ZIP archives.
+For NuGet sources, use `nuget://package` or `nuget://package@version`. By default `hx` uses the NuGet V3 service index at `https://api.nuget.org/v3/index.json`. Use `-registry` to point at a different NuGet V3 service index, and use `-target` to force a target framework selector such as `net8.0`, `netstandard2.0`, or `dotnetcore`. `-platform` remains an OS/arch selector and is not used to encode the .NET framework version. `hx` resolves the latest version from the flat container when needed, selects the most appropriate dependency group from the package `.nuspec`, then downloads the `.nupkg` files and extracts them like ZIP archives. `-registry` fragments are ignored; use `-target` explicitly instead.
 
 For WinGet sources, use `winget://Package.Identifier` or `winget://Package.Identifier@version`. By default `hx` uses the GitHub API view of `microsoft/winget-pkgs`. Use `-registry` to point at a different GitHub manifests API root, or a GitHub repository URL that can be normalized to one. `hx` resolves the selected manifest version, chooses an installer matching `-platform` architecture, follows package dependencies declared in the manifest when present, then downloads the referenced installer artifacts and handles them like any other source.
 
@@ -209,11 +214,11 @@ For PyPI sources, use `pypi://package` or `pypi://package@version`. By default `
 
 For npm sources, use `npm://package`, `npm://package@version`, or `npm://package@dist-tag`. Use `-registry` to point at a different npm registry base URL. `hx` resolves package metadata from the npm registry, selects the requested version, then downloads the published tarball and handles it like any other remote archive.
 
-For APT sources, use `apt://package` or `apt://package@version`. By default `hx` uses the Ubuntu archive at `https://archive.ubuntu.com/ubuntu` and, if no release is specified, picks the newest release in the repository that actually contains the requested package. Use `-registry` to point at a different APT base URL and optionally pin a release in the fragment, for example `-registry "https://archive.ubuntu.com/ubuntu/#bionic"`. `-platform` supplies the target architecture for APT package resolution.
+For APT sources, use `apt://package` or `apt://package@version`. By default `hx` uses the Ubuntu archive at `https://archive.ubuntu.com/ubuntu` and, if no target is specified, picks the newest repository target that actually contains the requested package. Use `-registry` to point at a different APT base URL and `-target` to choose a repository-specific target such as `bionic`. `-platform` supplies the target architecture for APT package resolution. `-registry` fragments are ignored; use `-target` explicitly instead.
 
-For RPM sources, use `rpm://package` or `rpm://package@version`. By default `hx` uses Fedora release repositories and picks the newest release exposed by the repository metadata. Use `-registry` to point at a different RPM repository base and optionally pin a release in the fragment, for example `-registry "https://mirrors.kernel.org/fedora/releases#42"`. `-platform` supplies the target architecture for RPM package resolution.
+For RPM sources, use `rpm://package` or `rpm://package@version`. By default `hx` uses Fedora release repositories and picks the newest repository target exposed by the metadata. Use `-registry` to point at a different RPM repository base and `-target` to choose a repository-specific target such as `42`. `-platform` supplies the target architecture for RPM package resolution. `-registry` fragments are ignored; use `-target` explicitly instead.
 
-For Alpine APK sources, use `apk://package` or `apk://package@version`. By default `hx` uses `https://dl-cdn.alpinelinux.org/alpine` and, if no release is specified, probes the repository and picks the newest `vX.Y` release that actually contains the requested package. Use `-registry` to point at a different Alpine base URL and optionally pin a release in the fragment, for example `-registry "https://dl-cdn.alpinelinux.org/alpine#v3.22"`. Add `?component=community` to switch repository component. `-platform` supplies the target architecture for APK package resolution.
+For Alpine APK sources, use `apk://package` or `apk://package@version`. By default `hx` uses `https://dl-cdn.alpinelinux.org/alpine` and, if no target is specified, probes the repository and picks the newest `vX.Y` target that actually contains the requested package. Use `-registry` to point at a different Alpine base URL and `-target` to choose a repository-specific target such as `v3.22` or `edge`. Add `?component=community` to switch repository component. `-platform` supplies the target architecture for APK package resolution. `-registry` fragments are ignored; use `-target` explicitly instead.
 
 For HTTPS sources, if certificate verification fails, `hx` emits a warning and retries insecurely instead of aborting the download.
 
@@ -256,6 +261,20 @@ Output binaries land in `bin/`:
 bin/hx.exe   Windows AMD64, statically linked
 bin/hx       Linux AMD64, statically linked
 ```
+
+## Testing
+
+Run the platform-native test script:
+
+```sh
+# Windows
+test.ps1
+
+# Linux / macOS
+chmod +x test.sh && ./test.sh
+```
+
+Both test scripts build `hx` first through the repo build scripts (`build.ps1` or `build.sh`) so local testing and release automation use the same toolchain/bootstrap path.
 
 ## License
 
