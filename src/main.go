@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,12 +18,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/mholt/archives"
+	rpmutils "github.com/sassoftware/go-rpmutils"
+	rpmcpio "github.com/sassoftware/go-rpmutils/cpio"
 )
+
+var errUnsupportedWindowsPath = errors.New("unsupported Windows path")
 
 type inputSource struct {
 	display string
@@ -33,6 +40,7 @@ type inputSource struct {
 	docker  *dockerSource
 	npm     *npmSource
 	apt     *aptSource
+	rpm     *rpmSource
 }
 
 type gitSource struct {
@@ -78,6 +86,12 @@ type aptSource struct {
 	version   string
 }
 
+type rpmSource struct {
+	name     string
+	version  string
+	registry string
+}
+
 const (
 	defaultNPMRegistry = "https://registry.npmjs.org"
 	defaultAPTRegistry = "https://archive.ubuntu.com/ubuntu"
@@ -95,7 +109,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, apt:// package reference, Git repository URL, or local file path")
+		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, apt:// package reference, rpm:// package reference, Git repository URL, or local file path")
 		fmt.Fprintln(os.Stderr, "  dest  destination folder (default: current directory); created if absent")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "flags:")
@@ -178,6 +192,65 @@ const renderInterval = 100 * time.Millisecond
 
 func newPrinter(ansi bool) *printer {
 	return &printer{ansi: ansi, start: time.Now(), dlTotal: -1, lastSize: -1}
+}
+
+type tlsFallbackTransport struct {
+	secure   *http.Transport
+	insecure *http.Transport
+	pr       *printer
+	mu       sync.Mutex
+	warned   map[string]bool
+}
+
+func newHTTPClient(pr *printer) *http.Client {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	secure := base.Clone()
+	insecure := base.Clone()
+	if insecure.TLSClientConfig == nil {
+		insecure.TLSClientConfig = &tls.Config{}
+	}
+	insecure.TLSClientConfig = insecure.TLSClientConfig.Clone()
+	insecure.TLSClientConfig.InsecureSkipVerify = true
+	return &http.Client{
+		Transport: &tlsFallbackTransport{
+			secure:   secure,
+			insecure: insecure,
+			pr:       pr,
+			warned:   map[string]bool{},
+		},
+	}
+}
+
+func (t *tlsFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.secure.RoundTrip(req)
+	if err == nil || req.URL == nil || req.URL.Scheme != "https" || !isTLSError(err) {
+		return resp, err
+	}
+	t.warn(req.URL.Host)
+	retry := req.Clone(req.Context())
+	retry.Header = req.Header.Clone()
+	return t.insecure.RoundTrip(retry)
+}
+
+func (t *tlsFallbackTransport) warn(host string) {
+	if t.pr == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.warned[host] {
+		return
+	}
+	t.warned[host] = true
+	t.pr.warn(fmt.Sprintf("TLS certificate verification failed for %s; retrying insecurely", host))
+}
+
+func isTLSError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "x509:") ||
+		strings.Contains(msg, "certificate has expired") ||
+		strings.Contains(msg, "certificate signed by unknown authority") ||
+		strings.Contains(msg, "tls:")
 }
 
 func (p *printer) commit() {
@@ -305,6 +378,9 @@ func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTemp
 	if src.apt != nil {
 		return runAPT(src, dest, skip, symlinks, downloadOnly, platform, pr)
 	}
+	if src.rpm != nil {
+		return runRPM(src, dest, skip, symlinks, downloadOnly, platform, pr)
+	}
 	if src.local {
 		return runLocal(src, dest, skip, symlinks, downloadOnly, pr)
 	}
@@ -313,7 +389,7 @@ func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTemp
 
 func runRemote(src inputSource, dest string, skip int, symlinks, downloadOnly, useTempFile bool, pr *printer) (int, error) {
 	ctx := context.Background()
-	client := &http.Client{}
+	client := newHTTPClient(pr)
 
 	resp, err := client.Get(src.display)
 	if err != nil {
@@ -488,6 +564,22 @@ type aptRepoIndex struct {
 	all  map[string][]aptPackage
 }
 
+type rpmRepoPackage struct {
+	Name     string
+	Arch     string
+	Version  string
+	Location string
+	Provides []string
+	Requires []string
+}
+
+type rpmRepoIndex struct {
+	best       map[string]rpmRepoPackage
+	all        map[string][]rpmRepoPackage
+	provides   map[string]string
+	allProvide map[string][]string
+}
+
 func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
 	platform, err := parsePlatform(platformRaw)
 	if err != nil {
@@ -499,7 +591,7 @@ func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bo
 	pr.info(fmt.Sprintf("format: docker  %s", platform.normalized))
 
 	rc := &dockerRegistryClient{
-		client:     &http.Client{},
+		client:     newHTTPClient(pr),
 		registry:   src.docker.registry,
 		repository: src.docker.repository,
 	}
@@ -522,7 +614,7 @@ func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bo
 
 func runNPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool, pr *printer) (int, error) {
 	ctx := context.Background()
-	client := &http.Client{}
+	client := newHTTPClient(pr)
 
 	entry, err := resolveNPMVersion(ctx, client, src.npm)
 	if err != nil {
@@ -571,7 +663,7 @@ func runNPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool,
 
 func runAPT(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
 	ctx := context.Background()
-	client := &http.Client{}
+	client := newHTTPClient(pr)
 	arch, err := aptArchFromPlatform(platformRaw)
 	if err != nil {
 		return 0, err
@@ -601,6 +693,48 @@ func runAPT(src inputSource, dest string, skip int, symlinks, downloadOnly bool,
 			continue
 		}
 		if err := extractAPTPackage(ctx, client, src.apt, pkg, dest, skip, symlinks, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
+}
+
+func runRPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
+	ctx := context.Background()
+	client := newHTTPClient(pr)
+	arch, err := rpmArchFromPlatform(platformRaw)
+	if err != nil {
+		return 0, err
+	}
+
+	baseURL, err := resolveRPMRegistry(client, src.rpm.registry, arch)
+	if err != nil {
+		return 0, err
+	}
+	index, err := fetchRPMIndex(ctx, client, baseURL, arch)
+	if err != nil {
+		return 0, err
+	}
+	root, order, err := resolveRPMDependencies(src.rpm, index)
+	if err != nil {
+		return 0, err
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: rpm  %s@%s  %s", root.Name, root.Version, arch))
+
+	for _, name := range order {
+		pkg := index.best[name]
+		if name == root.Name {
+			pkg = root
+		}
+		if downloadOnly {
+			if err := downloadRPMPackage(ctx, client, baseURL, pkg, dest, pr); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if err := extractRPMPackage(ctx, client, baseURL, pkg, dest, skip, symlinks, pr); err != nil {
 			return 0, err
 		}
 	}
@@ -1078,6 +1212,373 @@ func extractDeb(r io.Reader, dest string, skip int, symlinks bool, pr *printer) 
 	return ex.Extract(ctx, reader, func(ctx context.Context, f archives.FileInfo) error {
 		return handleEntry(f, dest, skip, symlinks, pr)
 	})
+}
+
+func fetchRPMIndex(ctx context.Context, client *http.Client, baseURL, arch string) (*rpmRepoIndex, error) {
+	repomdURL := strings.TrimRight(baseURL, "/") + "/repodata/repomd.xml"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, repomdURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rpm repomd request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("rpm repomd request failed: %s", resp.Status)
+	}
+	var repomd struct {
+		Data []struct {
+			Type     string `xml:"type,attr"`
+			Location struct {
+				Href string `xml:"href,attr"`
+			} `xml:"location"`
+		} `xml:"data"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&repomd); err != nil {
+		return nil, fmt.Errorf("parse rpm repomd: %w", err)
+	}
+	primaryHref := ""
+	for _, data := range repomd.Data {
+		if data.Type == "primary" {
+			primaryHref = data.Location.Href
+			break
+		}
+	}
+	if primaryHref == "" {
+		return nil, fmt.Errorf("rpm repository metadata does not expose primary data")
+	}
+
+	primaryURL := strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(primaryHref, "/")
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, primaryURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rpm primary request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("rpm primary request failed: %s", resp.Status)
+	}
+
+	br := bufio.NewReaderSize(resp.Body, 1<<16)
+	format, reader, err := archives.Identify(ctx, filepath.Base(primaryURL), br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return nil, fmt.Errorf("identify rpm primary metadata: %w", err)
+	}
+	var raw io.Reader = reader
+	if dec, ok := format.(archives.Decompressor); ok {
+		rc, err := dec.OpenReader(reader)
+		if err != nil {
+			return nil, fmt.Errorf("open rpm primary decompressor: %w", err)
+		}
+		defer rc.Close()
+		raw = rc
+	}
+
+	type rpmPrimaryEntry struct {
+		Name    string `xml:"name"`
+		Arch    string `xml:"arch"`
+		Version struct {
+			Epoch string `xml:"epoch,attr"`
+			Ver   string `xml:"ver,attr"`
+			Rel   string `xml:"rel,attr"`
+		} `xml:"version"`
+		Location struct {
+			Href string `xml:"href,attr"`
+		} `xml:"location"`
+		Format struct {
+			Provides struct {
+				Entries []struct {
+					Name string `xml:"name,attr"`
+				} `xml:"entry"`
+			} `xml:"provides"`
+			Requires struct {
+				Entries []struct {
+					Name string `xml:"name,attr"`
+				} `xml:"entry"`
+			} `xml:"requires"`
+		} `xml:"format"`
+	}
+	type rpmPrimary struct {
+		Packages []rpmPrimaryEntry `xml:"package"`
+	}
+	var metadata rpmPrimary
+	if err := xml.NewDecoder(raw).Decode(&metadata); err != nil {
+		return nil, fmt.Errorf("parse rpm primary metadata: %w", err)
+	}
+
+	index := &rpmRepoIndex{
+		best:       map[string]rpmRepoPackage{},
+		all:        map[string][]rpmRepoPackage{},
+		provides:   map[string]string{},
+		allProvide: map[string][]string{},
+	}
+	for _, entry := range metadata.Packages {
+		if entry.Location.Href == "" || entry.Name == "" {
+			continue
+		}
+		if entry.Arch != arch && entry.Arch != "noarch" {
+			continue
+		}
+		pkg := rpmRepoPackage{
+			Name:     entry.Name,
+			Arch:     entry.Arch,
+			Version:  rpmVersionString(entry.Version.Epoch, entry.Version.Ver, entry.Version.Rel),
+			Location: entry.Location.Href,
+		}
+		for _, p := range entry.Format.Provides.Entries {
+			if p.Name != "" {
+				pkg.Provides = append(pkg.Provides, p.Name)
+			}
+		}
+		for _, r := range entry.Format.Requires.Entries {
+			if r.Name != "" && !strings.HasPrefix(r.Name, "rpmlib(") {
+				pkg.Requires = append(pkg.Requires, r.Name)
+			}
+		}
+		index.all[pkg.Name] = append(index.all[pkg.Name], pkg)
+		if prev, ok := index.best[pkg.Name]; !ok || compareRPMVersion(pkg.Version, prev.Version) > 0 {
+			index.best[pkg.Name] = pkg
+		}
+		for _, prov := range pkg.Provides {
+			index.allProvide[prov] = append(index.allProvide[prov], pkg.Name)
+			if _, ok := index.provides[prov]; !ok {
+				index.provides[prov] = pkg.Name
+			}
+		}
+		index.provides[pkg.Name] = pkg.Name
+	}
+	return index, nil
+}
+
+func resolveRPMDependencies(src *rpmSource, index *rpmRepoIndex) (rpmRepoPackage, []string, error) {
+	root, err := selectRPMRoot(src, index)
+	if err != nil {
+		return rpmRepoPackage{}, nil, err
+	}
+	var order []string
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(string) error
+	visit = func(name string) error {
+		if visited[name] {
+			return nil
+		}
+		if visiting[name] {
+			return nil
+		}
+		pkg, ok := index.best[name]
+		if !ok {
+			return fmt.Errorf("rpm dependency %s not found in repository metadata", name)
+		}
+		visiting[name] = true
+		for _, dep := range pkg.Requires {
+			target := resolveRPMProvide(dep, index)
+			if target == "" {
+				continue
+			}
+			if err := visit(target); err != nil {
+				return err
+			}
+		}
+		visiting[name] = false
+		visited[name] = true
+		order = append(order, name)
+		return nil
+	}
+	if err := visit(root.Name); err != nil {
+		return rpmRepoPackage{}, nil, err
+	}
+	return root, order, nil
+}
+
+func selectRPMRoot(src *rpmSource, index *rpmRepoIndex) (rpmRepoPackage, error) {
+	entries := index.all[src.name]
+	if len(entries) == 0 {
+		return rpmRepoPackage{}, fmt.Errorf("rpm package %s not found in repository metadata", src.name)
+	}
+	if src.version == "" {
+		return index.best[src.name], nil
+	}
+	for _, pkg := range entries {
+		if pkg.Version == src.version || strings.Contains(pkg.Version, src.version) {
+			return pkg, nil
+		}
+	}
+	return rpmRepoPackage{}, fmt.Errorf("rpm package %s version %s not found in repository metadata", src.name, src.version)
+}
+
+func resolveRPMProvide(name string, index *rpmRepoIndex) string {
+	name = strings.TrimSpace(name)
+	if i := strings.IndexAny(name, " ("); i >= 0 {
+		name = name[:i]
+	}
+	if target, ok := index.provides[name]; ok {
+		return target
+	}
+	return ""
+}
+
+func downloadRPMPackage(ctx context.Context, client *http.Client, baseURL string, pkg rpmRepoPackage, dest string, pr *printer) error {
+	resp, err := fetchRPMFile(ctx, client, baseURL, pkg.Location)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	name := filepath.Base(pkg.Location)
+	pr.onFile(name, resp.ContentLength)
+	return writeSingleFile(resp.Body, dest, name)
+}
+
+func extractRPMPackage(ctx context.Context, client *http.Client, baseURL string, pkg rpmRepoPackage, dest string, skip int, symlinks bool, pr *printer) error {
+	resp, err := fetchRPMFile(ctx, client, baseURL, pkg.Location)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return extractRPM(resp.Body, dest, skip, symlinks, pr)
+}
+
+func fetchRPMFile(ctx context.Context, client *http.Client, baseURL, location string) (*http.Response, error) {
+	u := strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(location, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rpm package download: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("rpm package download failed: %s", resp.Status)
+	}
+	return resp, nil
+}
+
+func extractRPM(r io.Reader, dest string, skip int, symlinks bool, pr *printer) error {
+	rpm, err := rpmutils.ReadRpm(r)
+	if err != nil {
+		return fmt.Errorf("read rpm: %w", err)
+	}
+	payload, err := rpm.PayloadReaderExtended()
+	if err != nil {
+		return fmt.Errorf("open rpm payload: %w", err)
+	}
+	for {
+		info, err := payload.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read rpm payload: %w", err)
+		}
+		switch info.Mode() &^ 0o7777 {
+		case rpmcpio.S_ISDIR:
+			continue
+		case rpmcpio.S_ISLNK:
+			if unsupportedWindowsPath(info.Name(), skip) {
+				pr.warn(fmt.Sprintf("skipping unsupported Windows path from rpm payload: %s", info.Name()))
+				continue
+			}
+			if !symlinks {
+				continue
+			}
+			pr.onFile(info.Name(), -1)
+			if err := writeRPMSymlink(info, dest, skip); err != nil {
+				return err
+			}
+		case rpmcpio.S_ISREG:
+			if unsupportedWindowsPath(info.Name(), skip) {
+				pr.warn(fmt.Sprintf("skipping unsupported Windows path from rpm payload: %s", info.Name()))
+				continue
+			}
+			if payload.IsLink() {
+				continue
+			}
+			pr.onFile(info.Name(), info.Size())
+			if err := writeRPMRegularFile(payload, info, dest, skip); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func writeRPMRegularFile(r io.Reader, info rpmutils.FileInfo, dest string, skip int) error {
+	if unsupportedWindowsPath(info.Name(), skip) {
+		return nil
+	}
+	path, err := outPath(dest, info.Name(), skip)
+	if errors.Is(err, errUnsupportedWindowsPath) {
+		return nil
+	}
+	if err != nil || path == "" {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, r); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func writeRPMSymlink(info rpmutils.FileInfo, dest string, skip int) error {
+	if unsupportedWindowsPath(info.Name(), skip) {
+		return nil
+	}
+	path, err := outPath(dest, info.Name(), skip)
+	if errors.Is(err, errUnsupportedWindowsPath) {
+		return nil
+	}
+	if err != nil || path == "" {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	_ = os.Remove(path)
+	if err := os.Symlink(info.Linkname(), path); err != nil {
+		return fmt.Errorf("symlink %s -> %s: %w", path, info.Linkname(), err)
+	}
+	return nil
+}
+
+func unsupportedWindowsPath(name string, skip int) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	parts := entryParts(name, skip)
+	for _, part := range parts {
+		if strings.ContainsAny(part, `<>:"\|?*`) {
+			return true
+		}
+	}
+	return false
+}
+
+func rpmVersionString(epoch, ver, rel string) string {
+	if rel != "" {
+		ver = ver + "-" + rel
+	}
+	if epoch != "" && epoch != "0" {
+		return epoch + ":" + ver
+	}
+	return ver
+}
+
+func compareRPMVersion(a, b string) int {
+	return rpmutils.Vercmp(a, b)
 }
 
 func fetchDockerManifest(ctx context.Context, rc *dockerRegistryClient, reference string, platform platformSpec) (*dockerManifest, []byte, error) {
@@ -1725,6 +2226,13 @@ func outPath(dest, nameInArchive string, skip int) (string, error) {
 	if len(parts) == 0 {
 		return "", nil
 	}
+	if runtime.GOOS == "windows" {
+		for _, part := range parts {
+			if strings.ContainsAny(part, `<>:"\|?*`) {
+				return "", errUnsupportedWindowsPath
+			}
+		}
+	}
 	rel := filepath.Join(parts...)
 	if rel == "" || rel == "." {
 		return "", nil
@@ -1796,6 +2304,17 @@ func formatSizeInfo(size int64) string {
 }
 
 func resolveInputSource(arg, registry string) (inputSource, error) {
+	if rs, ok, err := parseRPMSource(arg, registry); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      rpmSourceID(rs),
+			hint:    rs.name + ".rpm",
+			rpm:     rs,
+		}, nil
+	}
+
 	if as, ok, err := parseAPTSource(arg, registry); err != nil {
 		return inputSource{}, err
 	} else if ok {
@@ -1872,6 +2391,31 @@ func resolveInputSource(arg, registry string) (inputSource, error) {
 func isRemoteSource(s string) bool {
 	s = strings.ToLower(s)
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func parseRPMSource(raw, registry string) (*rpmSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "rpm:\\") {
+		raw = "rpm://" + raw[len("rpm:\\"):]
+		lower = strings.ToLower(raw)
+	}
+	if !strings.HasPrefix(lower, "rpm://") {
+		return nil, false, nil
+	}
+	ref := raw[len("rpm://"):]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty rpm source")
+	}
+	name := ref
+	version := ""
+	if i := strings.LastIndex(ref, "@"); i > 0 {
+		name = ref[:i]
+		version = ref[i+1:]
+	}
+	if name == "" {
+		return nil, false, fmt.Errorf("invalid rpm source")
+	}
+	return &rpmSource{name: name, version: version, registry: registry}, true, nil
 }
 
 func parseNPMSource(raw, registryOverride string) (*npmSource, bool, error) {
@@ -2219,6 +2763,13 @@ func npmSourceID(ns *npmSource) string {
 	return "npm://" + ns.name + "@" + ns.selector
 }
 
+func rpmSourceID(rs *rpmSource) string {
+	if rs.version == "" {
+		return "rpm://" + rs.name
+	}
+	return "rpm://" + rs.name + "@" + rs.version
+}
+
 func npmHint(ns *npmSource) string {
 	base := filepath.Base(ns.name)
 	base = strings.TrimPrefix(base, "@")
@@ -2330,6 +2881,94 @@ func aptArchFromPlatform(raw string) (string, error) {
 	default:
 		return p.arch, nil
 	}
+}
+
+func rpmArchFromPlatform(raw string) (string, error) {
+	p, err := parsePlatform(raw)
+	if err != nil {
+		return "", err
+	}
+	switch p.arch {
+	case "amd64":
+		return "x86_64", nil
+	case "386":
+		return "i686", nil
+	case "arm64":
+		return "aarch64", nil
+	case "arm":
+		return "armhfp", nil
+	default:
+		return p.arch, nil
+	}
+}
+
+func resolveRPMRegistry(client *http.Client, raw, arch string) (string, error) {
+	if raw != "" {
+		if !strings.Contains(raw, "://") {
+			raw = "https://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", err
+		}
+		if strings.Contains(u.Path, "/repodata") || strings.HasSuffix(u.Path, "/os/") || strings.HasSuffix(u.Path, "/os") {
+			return strings.TrimRight(u.String(), "/"), nil
+		}
+		dist := strings.Trim(u.Fragment, "/")
+		u.Fragment = ""
+		u.RawQuery = ""
+		base := strings.TrimRight(u.String(), "/")
+		if dist != "" {
+			return fmt.Sprintf("%s/%s/Everything/%s/os", base, dist, arch), nil
+		}
+	}
+	base := "https://mirrors.kernel.org/fedora/releases"
+	rel, err := detectLatestFedoraRelease(client, arch)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/%s/Everything/%s/os", base, rel, arch), nil
+}
+
+func detectLatestFedoraRelease(client *http.Client, arch string) (string, error) {
+	resp, err := client.Get("https://fedoraproject.org/releases.json")
+	if err != nil {
+		return "", fmt.Errorf("fedora releases metadata request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fedora releases metadata request failed: %s", resp.Status)
+	}
+	var releases []struct {
+		Version string `json:"version"`
+		Arch    string `json:"arch"`
+		Link    string `json:"link"`
+		Variant string `json:"variant"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return "", fmt.Errorf("parse fedora releases metadata: %w", err)
+	}
+	best := -1
+	for _, item := range releases {
+		if item.Arch != arch || item.Variant != "Everything" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(item.Version), "beta") || strings.Contains(item.Link, "/test/") {
+			continue
+		}
+		cand := strings.TrimSpace(item.Version)
+		var n int
+		if _, err := fmt.Sscanf(cand, "%d", &n); err != nil {
+			continue
+		}
+		if n > best {
+			best = n
+		}
+	}
+	if best < 0 {
+		return "", fmt.Errorf("could not detect latest Fedora release for arch %s", arch)
+	}
+	return fmt.Sprintf("%d", best), nil
 }
 
 func defaultDockerPlatform() string {
