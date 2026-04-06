@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -17,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +44,7 @@ type inputSource struct {
 	npm     *npmSource
 	apt     *aptSource
 	rpm     *rpmSource
+	apk     *apkSource
 }
 
 type gitSource struct {
@@ -92,9 +96,19 @@ type rpmSource struct {
 	registry string
 }
 
+type apkSource struct {
+	name      string
+	version   string
+	registry  string
+	baseURL   string
+	release   string
+	component string
+}
+
 const (
 	defaultNPMRegistry = "https://registry.npmjs.org"
 	defaultAPTRegistry = "https://archive.ubuntu.com/ubuntu"
+	defaultAPKRegistry = "https://dl-cdn.alpinelinux.org/alpine"
 )
 
 func main() {
@@ -104,12 +118,12 @@ func main() {
 	downloadOnly := flag.Bool("download-only", false, "download/copy the original source without extracting it")
 	noTempFile := flag.Bool("no-tempfile", false, "buffer non-Range ZIP in memory instead of a temp file")
 	platform := flag.String("platform", defaultDockerPlatform(), "platform for registry images (for example linux/amd64)")
-	registry := flag.String("registry", "", "override registry/repository base for docker, npm, or apt sources")
+	registry := flag.String("registry", "", "override registry/repository base for docker, npm, apt, rpm, or apk sources")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, apt:// package reference, rpm:// package reference, Git repository URL, or local file path")
+		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, apt:// package reference, rpm:// package reference, apk:// package reference, Git repository URL, or local file path")
 		fmt.Fprintln(os.Stderr, "  dest  destination folder (default: current directory); created if absent")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "flags:")
@@ -381,6 +395,9 @@ func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTemp
 	if src.rpm != nil {
 		return runRPM(src, dest, skip, symlinks, downloadOnly, platform, pr)
 	}
+	if src.apk != nil {
+		return runAPK(src, dest, skip, symlinks, downloadOnly, platform, pr)
+	}
 	if src.local {
 		return runLocal(src, dest, skip, symlinks, downloadOnly, pr)
 	}
@@ -580,6 +597,21 @@ type rpmRepoIndex struct {
 	allProvide map[string][]string
 }
 
+type apkPackage struct {
+	Name     string
+	Version  string
+	Arch     string
+	Filename string
+	Depends  []string
+	Provides []string
+}
+
+type apkRepoIndex struct {
+	best     map[string]apkPackage
+	all      map[string][]apkPackage
+	provides map[string]string
+}
+
 func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
 	platform, err := parsePlatform(platformRaw)
 	if err != nil {
@@ -735,6 +767,44 @@ func runRPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool,
 			continue
 		}
 		if err := extractRPMPackage(ctx, client, baseURL, pkg, dest, skip, symlinks, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
+}
+
+func runAPK(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
+	ctx := context.Background()
+	client := newHTTPClient(pr)
+	arch, err := apkArchFromPlatform(platformRaw)
+	if err != nil {
+		return 0, err
+	}
+
+	index, err := fetchAPKIndex(ctx, client, src.apk, arch)
+	if err != nil {
+		return 0, err
+	}
+	root, order, err := resolveAPKDependencies(src.apk, index)
+	if err != nil {
+		return 0, err
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: apk  %s@%s  %s/%s", root.Name, root.Version, src.apk.release, arch))
+
+	for _, name := range order {
+		pkg := index.best[name]
+		if name == root.Name {
+			pkg = root
+		}
+		if downloadOnly {
+			if err := downloadAPKPackage(ctx, client, src.apk, pkg, dest, pr); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if err := extractAPKPackage(ctx, client, src.apk, pkg, dest, skip, symlinks, pr); err != nil {
 			return 0, err
 		}
 	}
@@ -1355,6 +1425,78 @@ func fetchRPMIndex(ctx context.Context, client *http.Client, baseURL, arch strin
 	return index, nil
 }
 
+func fetchAPKIndex(ctx context.Context, client *http.Client, src *apkSource, arch string) (*apkRepoIndex, error) {
+	if src.release == "" {
+		releases, err := listAPKReleases(client, src.baseURL)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, rel := range releases {
+			trySrc := *src
+			trySrc.release = rel
+			index, err := fetchAPKIndex(ctx, client, &trySrc, arch)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if _, ok := index.best[src.name]; ok {
+				src.release = rel
+				return index, nil
+			}
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("apk package %s not found in repository %s", src.name, src.baseURL)
+	}
+
+	indexURL := fmt.Sprintf("%s/%s/%s/%s/APKINDEX.tar.gz", strings.TrimRight(src.baseURL, "/"), src.release, src.component, arch)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("apk index request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("apk index request failed: %s", resp.Status)
+	}
+	indexData, err := extractAPKIndex(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := parseAPKIndex(indexData, arch)
+	if err != nil {
+		return nil, err
+	}
+	best := make(map[string]apkPackage, len(entries))
+	all := make(map[string][]apkPackage, len(entries))
+	provides := map[string]string{}
+	for _, pkg := range entries {
+		if pkg.Name == "" || pkg.Version == "" {
+			continue
+		}
+		if _, ok := best[pkg.Name]; !ok {
+			best[pkg.Name] = pkg
+		}
+		all[pkg.Name] = append(all[pkg.Name], pkg)
+		provides[pkg.Name] = pkg.Name
+		for _, prov := range pkg.Provides {
+			if _, ok := provides[prov]; !ok {
+				provides[prov] = pkg.Name
+			}
+		}
+	}
+	return &apkRepoIndex{
+		best:     best,
+		all:      all,
+		provides: provides,
+	}, nil
+}
+
 func resolveRPMDependencies(src *rpmSource, index *rpmRepoIndex) (rpmRepoPackage, []string, error) {
 	root, err := selectRPMRoot(src, index)
 	if err != nil {
@@ -1394,6 +1536,172 @@ func resolveRPMDependencies(src *rpmSource, index *rpmRepoIndex) (rpmRepoPackage
 		return rpmRepoPackage{}, nil, err
 	}
 	return root, order, nil
+}
+
+func resolveAPKDependencies(src *apkSource, index *apkRepoIndex) (apkPackage, []string, error) {
+	root, err := selectAPKRoot(src, index)
+	if err != nil {
+		return apkPackage{}, nil, err
+	}
+	var order []string
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var visit func(string) error
+	visit = func(name string) error {
+		if visited[name] || visiting[name] {
+			return nil
+		}
+		pkg, ok := index.best[name]
+		if !ok {
+			return fmt.Errorf("apk dependency %s not found in repository metadata", name)
+		}
+		visiting[name] = true
+		for _, dep := range pkg.Depends {
+			target := resolveAPKProvide(dep, index)
+			if target == "" {
+				continue
+			}
+			if err := visit(target); err != nil {
+				return err
+			}
+		}
+		visiting[name] = false
+		visited[name] = true
+		order = append(order, name)
+		return nil
+	}
+	if err := visit(root.Name); err != nil {
+		return apkPackage{}, nil, err
+	}
+	return root, order, nil
+}
+
+func selectAPKRoot(src *apkSource, index *apkRepoIndex) (apkPackage, error) {
+	entries := index.all[src.name]
+	if len(entries) == 0 {
+		return apkPackage{}, fmt.Errorf("apk package %s not found in repository metadata", src.name)
+	}
+	if src.version == "" {
+		return index.best[src.name], nil
+	}
+	for _, pkg := range entries {
+		if pkg.Version == src.version || strings.Contains(pkg.Version, src.version) {
+			return pkg, nil
+		}
+	}
+	return apkPackage{}, fmt.Errorf("apk package %s version %s not found in repository metadata", src.name, src.version)
+}
+
+func resolveAPKProvide(name string, index *apkRepoIndex) string {
+	name = cleanAPKDep(name)
+	if name == "" {
+		return ""
+	}
+	if target, ok := index.provides[name]; ok {
+		return target
+	}
+	return ""
+}
+
+func downloadAPKPackage(ctx context.Context, client *http.Client, src *apkSource, pkg apkPackage, dest string, pr *printer) error {
+	resp, err := fetchAPKFile(ctx, client, src, pkg)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	name := filepath.Base(pkg.Filename)
+	pr.onFile(name, resp.ContentLength)
+	return writeSingleFile(resp.Body, dest, name)
+}
+
+func extractAPKPackage(ctx context.Context, client *http.Client, src *apkSource, pkg apkPackage, dest string, skip int, symlinks bool, pr *printer) error {
+	resp, err := fetchAPKFile(ctx, client, src, pkg)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return extractAPK(resp.Body, dest, skip, symlinks, pr)
+}
+
+func fetchAPKFile(ctx context.Context, client *http.Client, src *apkSource, pkg apkPackage) (*http.Response, error) {
+	u := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(src.baseURL, "/"), src.release, src.component, pkg.Arch, pkg.Filename)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("apk package download: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("apk package download failed: %s", resp.Status)
+	}
+	return resp, nil
+}
+
+func extractAPK(r io.Reader, dest string, skip int, symlinks bool, pr *printer) error {
+	gr, err := gzip.NewReader(r)
+	if err != nil {
+		return fmt.Errorf("open apk gzip stream: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read apk payload: %w", err)
+		}
+		name := filepath.ToSlash(strings.TrimPrefix(hdr.Name, "./"))
+		if name == "" {
+			continue
+		}
+		if isAPKControlEntry(name) {
+			continue
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			path, err := outPath(dest, name, skip)
+			if errors.Is(err, errUnsupportedWindowsPath) {
+				pr.warn(fmt.Sprintf("skipping unsupported Windows path from apk payload: %s", name))
+				continue
+			}
+			if err != nil || path == "" {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeSymlink:
+			if unsupportedWindowsPath(name, skip) {
+				pr.warn(fmt.Sprintf("skipping unsupported Windows path from apk payload: %s", name))
+				continue
+			}
+			if !symlinks {
+				continue
+			}
+			pr.onFile(name, -1)
+			if err := writeAPKSymlink(dest, name, hdr.Linkname, skip); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if unsupportedWindowsPath(name, skip) {
+				pr.warn(fmt.Sprintf("skipping unsupported Windows path from apk payload: %s", name))
+				continue
+			}
+			pr.onFile(name, hdr.Size)
+			if err := writeAPKRegularFile(tr, dest, name, skip); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func selectRPMRoot(src *rpmSource, index *rpmRepoIndex) (rpmRepoPackage, error) {
@@ -1506,6 +1814,46 @@ func extractRPM(r io.Reader, dest string, skip int, symlinks bool, pr *printer) 
 			}
 		}
 	}
+}
+
+func writeAPKRegularFile(r io.Reader, dest, name string, skip int) error {
+	path, err := outPath(dest, name, skip)
+	if errors.Is(err, errUnsupportedWindowsPath) {
+		return nil
+	}
+	if err != nil || path == "" {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, r); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func writeAPKSymlink(dest, name, target string, skip int) error {
+	path, err := outPath(dest, name, skip)
+	if errors.Is(err, errUnsupportedWindowsPath) {
+		return nil
+	}
+	if err != nil || path == "" {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	_ = os.Remove(path)
+	if err := os.Symlink(target, path); err != nil {
+		return fmt.Errorf("symlink %s -> %s: %w", path, target, err)
+	}
+	return nil
 }
 
 func writeRPMRegularFile(r io.Reader, info rpmutils.FileInfo, dest string, skip int) error {
@@ -2304,6 +2652,17 @@ func formatSizeInfo(size int64) string {
 }
 
 func resolveInputSource(arg, registry string) (inputSource, error) {
+	if as, ok, err := parseAPKSource(arg, registry); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      apkSourceID(as),
+			hint:    as.name + ".apk",
+			apk:     as,
+		}, nil
+	}
+
 	if rs, ok, err := parseRPMSource(arg, registry); err != nil {
 		return inputSource{}, err
 	} else if ok {
@@ -2391,6 +2750,42 @@ func resolveInputSource(arg, registry string) (inputSource, error) {
 func isRemoteSource(s string) bool {
 	s = strings.ToLower(s)
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func parseAPKSource(raw, registry string) (*apkSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "apk:\\") {
+		raw = "apk://" + raw[len("apk:\\"):]
+		lower = strings.ToLower(raw)
+	}
+	if !strings.HasPrefix(lower, "apk://") {
+		return nil, false, nil
+	}
+	ref := raw[len("apk://"):]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty apk source")
+	}
+	name := ref
+	version := ""
+	if i := strings.LastIndex(ref, "@"); i > 0 {
+		name = ref[:i]
+		version = ref[i+1:]
+	}
+	if name == "" {
+		return nil, false, fmt.Errorf("invalid apk source")
+	}
+	baseURL, release, component, err := resolveAPKRegistry(registry)
+	if err != nil {
+		return nil, false, err
+	}
+	return &apkSource{
+		name:      name,
+		version:   version,
+		registry:  registry,
+		baseURL:   baseURL,
+		release:   release,
+		component: component,
+	}, true, nil
 }
 
 func parseRPMSource(raw, registry string) (*rpmSource, bool, error) {
@@ -2770,6 +3165,17 @@ func rpmSourceID(rs *rpmSource) string {
 	return "rpm://" + rs.name + "@" + rs.version
 }
 
+func apkSourceID(as *apkSource) string {
+	release := as.release
+	if release == "" {
+		release = "latest"
+	}
+	if as.version != "" {
+		return fmt.Sprintf("apk://%s@%s#%s?component=%s", as.name, as.version, release, as.component)
+	}
+	return fmt.Sprintf("apk://%s#%s?component=%s", as.name, release, as.component)
+}
+
 func npmHint(ns *npmSource) string {
 	base := filepath.Base(ns.name)
 	base = strings.TrimPrefix(base, "@")
@@ -2794,7 +3200,7 @@ func aptSourceID(as *aptSource) string {
 }
 
 func platformKey(src inputSource, raw string) string {
-	if src.docker == nil && src.apt == nil {
+	if src.docker == nil && src.apt == nil && src.rpm == nil && src.apk == nil {
 		return ""
 	}
 	if src.docker != nil {
@@ -2805,6 +3211,20 @@ func platformKey(src inputSource, raw string) string {
 		return p.normalized
 	}
 	arch, err := aptArchFromPlatform(raw)
+	if src.apt != nil {
+		if err != nil {
+			return raw
+		}
+		return arch
+	}
+	if src.rpm != nil {
+		arch, err := rpmArchFromPlatform(raw)
+		if err != nil {
+			return raw
+		}
+		return arch
+	}
+	arch, err = apkArchFromPlatform(raw)
 	if err != nil {
 		return raw
 	}
@@ -2861,6 +3281,29 @@ func resolveAPTRegistry(raw string) (baseURL, dist, component string, err error)
 	return baseURL, dist, component, nil
 }
 
+func resolveAPKRegistry(raw string) (baseURL, release, component string, err error) {
+	reg := raw
+	if reg == "" {
+		reg = defaultAPKRegistry
+	}
+	if !strings.Contains(reg, "://") {
+		reg = "https://" + reg
+	}
+	u, err := url.Parse(reg)
+	if err != nil {
+		return "", "", "", err
+	}
+	component = u.Query().Get("component")
+	if component == "" {
+		component = "main"
+	}
+	release = strings.Trim(u.Fragment, "/")
+	u.RawQuery = ""
+	u.Fragment = ""
+	baseURL = strings.TrimRight(u.String(), "/")
+	return baseURL, release, component, nil
+}
+
 func aptArchFromPlatform(raw string) (string, error) {
 	p, err := parsePlatform(raw)
 	if err != nil {
@@ -2897,6 +3340,30 @@ func rpmArchFromPlatform(raw string) (string, error) {
 		return "aarch64", nil
 	case "arm":
 		return "armhfp", nil
+	default:
+		return p.arch, nil
+	}
+}
+
+func apkArchFromPlatform(raw string) (string, error) {
+	p, err := parsePlatform(raw)
+	if err != nil {
+		return "", err
+	}
+	switch p.arch {
+	case "amd64":
+		return "x86_64", nil
+	case "386":
+		return "x86", nil
+	case "arm64":
+		return "aarch64", nil
+	case "arm":
+		switch p.variant {
+		case "v6", "v5":
+			return "armhf", nil
+		default:
+			return "armv7", nil
+		}
 	default:
 		return p.arch, nil
 	}
@@ -2971,6 +3438,52 @@ func detectLatestFedoraRelease(client *http.Client, arch string) (string, error)
 	return fmt.Sprintf("%d", best), nil
 }
 
+func listAPKReleases(client *http.Client, baseURL string) ([]string, error) {
+	resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/")
+	if err != nil {
+		return nil, fmt.Errorf("apk releases listing request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("apk releases listing request failed: %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read apk releases listing: %w", err)
+	}
+	candidates := parseAPTListingCandidates(string(body))
+	type releaseSpec struct {
+		name  string
+		major int
+		minor int
+	}
+	var releases []releaseSpec
+	for _, cand := range candidates {
+		if !strings.HasPrefix(cand, "v") {
+			continue
+		}
+		var major, minor int
+		if _, err := fmt.Sscanf(cand, "v%d.%d", &major, &minor); err != nil {
+			continue
+		}
+		releases = append(releases, releaseSpec{name: cand, major: major, minor: minor})
+	}
+	sort.Slice(releases, func(i, j int) bool {
+		if releases[i].major != releases[j].major {
+			return releases[i].major > releases[j].major
+		}
+		return releases[i].minor > releases[j].minor
+	})
+	out := make([]string, 0, len(releases))
+	for _, rel := range releases {
+		out = append(out, rel.name)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("could not detect alpine releases from %s", baseURL)
+	}
+	return out, nil
+}
+
 func defaultDockerPlatform() string {
 	arch := runtime.GOARCH
 	if arch == "" {
@@ -3001,6 +3514,108 @@ func parsePlatform(raw string) (platformSpec, error) {
 		p.normalized += "/" + p.variant
 	}
 	return p, nil
+}
+
+func extractAPKIndex(r io.Reader) ([]byte, error) {
+	gr, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, fmt.Errorf("open apk index gzip stream: %w", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read apk index tarball: %w", err)
+		}
+		if filepath.Base(hdr.Name) != "APKINDEX" {
+			continue
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("read APKINDEX: %w", err)
+		}
+		return body, nil
+	}
+	return nil, fmt.Errorf("apk index does not contain APKINDEX")
+}
+
+func parseAPKIndex(body []byte, arch string) ([]apkPackage, error) {
+	chunks := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n\n")
+	var out []apkPackage
+	for _, chunk := range chunks {
+		if strings.TrimSpace(chunk) == "" {
+			continue
+		}
+		fields := parseAPKFields(chunk)
+		pkgArch := fields["A"]
+		if pkgArch == "" {
+			pkgArch = arch
+		}
+		pkg := apkPackage{
+			Name:     fields["P"],
+			Version:  fields["V"],
+			Arch:     pkgArch,
+			Filename: fields["P"] + "-" + fields["V"] + ".apk",
+			Depends:  parseAPKList(fields["D"]),
+			Provides: parseAPKList(fields["p"]),
+		}
+		if pkg.Name != "" {
+			out = append(out, pkg)
+		}
+	}
+	return out, nil
+}
+
+func parseAPKFields(chunk string) map[string]string {
+	fields := map[string]string{}
+	for _, line := range strings.Split(chunk, "\n") {
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return fields
+}
+
+func parseAPKList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	items := strings.Fields(raw)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = cleanAPKDep(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func cleanAPKDep(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if i := strings.IndexAny(raw, "=<>~"); i >= 0 {
+		raw = raw[:i]
+	}
+	return strings.TrimSpace(raw)
+}
+
+func isAPKControlEntry(name string) bool {
+	if strings.Contains(name, "/") {
+		return false
+	}
+	return strings.HasPrefix(name, ".")
 }
 
 func looksLikeRegistryHost(s string) bool {

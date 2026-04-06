@@ -1,6 +1,6 @@
 # hx
 
-Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, npm packages, APT repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
+Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
 
 ## Install
 
@@ -16,7 +16,7 @@ hx [flags] <source> [dest]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `npm://` package reference, `apt://` package reference, Git repository URL, or local file path |
+| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `npm://` package reference, `apt://` package reference, `rpm://` package reference, `apk://` package reference, Git repository URL, or local file path |
 | `dest` | no | Destination folder; defaults to current directory; created if absent |
 
 | Flag | Default | Description |
@@ -27,7 +27,7 @@ hx [flags] <source> [dest]
 | `-download-only` | off | Download/copy the original source file without extracting or decompressing it |
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
 | `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images, for example `linux/amd64` |
-| `-registry VALUE` | auto | Override the registry/repository base for Docker, npm, or APT sources |
+| `-registry VALUE` | auto | Override the registry/repository base for Docker, npm, APT, RPM, or APK sources |
 
 Flags must be placed before `source`.
 
@@ -91,6 +91,21 @@ hx -registry "https://archive.ubuntu.com/ubuntu/#bionic" apt://curl ./out
 # Download the resolved .deb files without extracting them
 hx -download-only apt://curl ./out
 
+# Extract an RPM package plus its dependencies
+hx rpm://bash ./out
+
+# Pin the RPM repository/release with -registry
+hx -registry "https://mirrors.kernel.org/fedora/releases#42" rpm://bash ./out
+
+# Extract an Alpine APK package plus its dependencies
+hx apk://curl ./out
+
+# Pin the Alpine repository/release with -registry
+hx -registry "https://dl-cdn.alpinelinux.org/alpine#v3.22" apk://curl ./out
+
+# Download the resolved .apk files without extracting them
+hx -download-only apk://curl ./out
+
 # Strip prefix and extract symlinks
 hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
 
@@ -127,9 +142,11 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
 - Docker sources are keyed by normalized image reference plus selected platform.
 - npm sources are keyed by package name plus the selected version or dist-tag.
-- APT sources are keyed by package name/version plus the resolved repository release.
+- APT sources are keyed by package name/version plus the selected repository release selector.
+- RPM sources are keyed by package name/version.
+- APK sources are keyed by package name/version plus the selected repository release selector.
 - Local sources are keyed by absolute file path.
-- Changing the source, destination, `-skip`, `-symlinks`, `-download-only`, `-registry`, or `-platform` triggers a fresh extraction/download.
+- Changing the source, destination, `-skip`, `-symlinks`, `-download-only`, or `-platform` triggers a fresh extraction/download.
 
 ## Supported formats
 
@@ -140,6 +157,8 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - **Docker/OCI registry images** fetched directly from the registry HTTP API
 - **npm packages** fetched from the npm registry and resolved to their published tarballs
 - **APT packages** resolved from a repository `Packages` index, including transitive dependencies
+- **RPM packages** resolved from repository metadata, including transitive dependencies
+- **Alpine APK packages** resolved from `APKINDEX.tar.gz`, including transitive dependencies
 
 Format is auto-detected from magic bytes. If no archive/compression format matches, `hx` falls back to copying the source file into `dest`.
 
@@ -153,6 +172,12 @@ For npm sources, use `npm://package`, `npm://package@version`, or `npm://package
 
 For APT sources, use `apt://package` or `apt://package@version`. By default `hx` uses the Ubuntu archive at `https://archive.ubuntu.com/ubuntu` and, if no release is specified, picks the newest release in the repository that actually contains the requested package. Use `-registry` to point at a different APT base URL and optionally pin a release in the fragment, for example `-registry "https://archive.ubuntu.com/ubuntu/#bionic"`. `-platform` supplies the target architecture for APT package resolution.
 
+For RPM sources, use `rpm://package` or `rpm://package@version`. By default `hx` uses Fedora release repositories and picks the newest release exposed by the repository metadata. Use `-registry` to point at a different RPM repository base and optionally pin a release in the fragment, for example `-registry "https://mirrors.kernel.org/fedora/releases#42"`. `-platform` supplies the target architecture for RPM package resolution.
+
+For Alpine APK sources, use `apk://package` or `apk://package@version`. By default `hx` uses `https://dl-cdn.alpinelinux.org/alpine` and, if no release is specified, probes the repository and picks the newest `vX.Y` release that actually contains the requested package. Use `-registry` to point at a different Alpine base URL and optionally pin a release in the fragment, for example `-registry "https://dl-cdn.alpinelinux.org/alpine#v3.22"`. Add `?component=community` to switch repository component. `-platform` supplies the target architecture for APK package resolution.
+
+For HTTPS sources, if certificate verification fails, `hx` emits a warning and retries insecurely instead of aborting the download.
+
 ## Streaming design
 
 | Format | Strategy |
@@ -163,9 +188,11 @@ For APT sources, use `apt://package` or `apt://package@version`. By default `hx`
 | Single-file compression (`.gz`, `.xz`, ...) | The stream is decompressed and written as a single output file inside `dest`, usually with the compression suffix removed. |
 | Plain files | If no registered format matches, the source is copied into `dest` without extraction. |
 | Local files | Read directly from disk. Local ZIP archives are extracted from the source file itself, so no HTTP buffering/temp-file fallback is involved. |
-| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. |
+| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. For RPM and APK sources it downloads the resolved package files without unpacking them. |
 | npm packages | Package metadata is fetched from the npm registry, a version or dist-tag is resolved, then the published tarball is downloaded and extracted or copied with the normal archive/file pipeline. |
 | APT repositories | The repository `Packages` index is fetched, a package plus its dependencies are resolved, then each `.deb` is downloaded and extracted or copied with the normal archive/file pipeline. |
+| RPM repositories | Repository metadata is fetched from `repomd.xml`, dependencies are resolved from the primary metadata, then each `.rpm` is downloaded and either extracted or copied into `dest`. |
+| Alpine APK repositories | `APKINDEX.tar.gz` is fetched from the selected release/component/architecture, dependencies are resolved from `P`/`D`/`p` fields, then each `.apk` is downloaded and either extracted or copied into `dest`. |
 | Git repositories | Cloned into a temp directory with `go-git`, then only the checked-out worktree contents are copied into `dest` without leaving a usable `.git` directory behind. Default branch, branch, and tag downloads use a shallow clone; exact commit downloads may fall back to a broader fetch so the requested commit can be checked out. |
 | Docker registry images | The image manifest is fetched from the registry API, the requested platform is selected, and each layer is streamed and applied directly into `dest` without temp files or a local container runtime. With `-download-only`, the selected manifest and original blobs are downloaded instead. |
 
