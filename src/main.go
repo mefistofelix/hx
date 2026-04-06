@@ -31,6 +31,7 @@ type inputSource struct {
 	path    string
 	git     *gitSource
 	docker  *dockerSource
+	npm     *npmSource
 }
 
 type gitSource struct {
@@ -62,6 +63,12 @@ type platformSpec struct {
 	normalized string
 }
 
+type npmSource struct {
+	registry string
+	name     string
+	selector string
+}
+
 func main() {
 	skip := flag.Int("skip", 0, "strip N leading path components from each archive entry")
 	symlinks := flag.Bool("symlinks", false, "extract symbolic links (skipped by default for safety)")
@@ -73,7 +80,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, Git repository URL, or local file path")
+		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, npm:// package reference, Git repository URL, or local file path")
 		fmt.Fprintln(os.Stderr, "  dest  destination folder (default: current directory); created if absent")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "flags:")
@@ -277,6 +284,9 @@ func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTemp
 	if src.docker != nil {
 		return runDocker(src, dest, skip, symlinks, downloadOnly, platform, pr)
 	}
+	if src.npm != nil {
+		return runNPM(src, dest, skip, symlinks, downloadOnly, pr)
+	}
 	if src.local {
 		return runLocal(src, dest, skip, symlinks, downloadOnly, pr)
 	}
@@ -431,11 +441,22 @@ type dockerTokenResponse struct {
 	AccessToken string `json:"access_token"`
 }
 
-func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
-	if downloadOnly {
-		return 0, fmt.Errorf("-download-only is not supported for docker sources")
-	}
+type npmPackument struct {
+	DistTags map[string]string          `json:"dist-tags"`
+	Versions map[string]npmVersionEntry `json:"versions"`
+}
 
+type npmVersionEntry struct {
+	Name    string      `json:"name"`
+	Version string      `json:"version"`
+	Dist    npmDistInfo `json:"dist"`
+}
+
+type npmDistInfo struct {
+	Tarball string `json:"tarball"`
+}
+
+func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
 	platform, err := parsePlatform(platformRaw)
 	if err != nil {
 		return 0, err
@@ -451,9 +472,12 @@ func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bo
 		repository: src.docker.repository,
 	}
 
-	manifest, err := fetchDockerManifest(ctx, rc, src.docker.reference, platform)
+	manifest, manifestBytes, err := fetchDockerManifest(ctx, rc, src.docker.reference, platform)
 	if err != nil {
 		return 0, err
+	}
+	if downloadOnly {
+		return downloadDockerImage(ctx, rc, manifest, manifestBytes, dest, pr)
 	}
 
 	for _, layer := range manifest.Layers {
@@ -464,10 +488,110 @@ func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bo
 	return pr.fileCount, nil
 }
 
-func fetchDockerManifest(ctx context.Context, rc *dockerRegistryClient, reference string, platform platformSpec) (*dockerManifest, error) {
+func runNPM(src inputSource, dest string, skip int, symlinks, downloadOnly bool, pr *printer) (int, error) {
+	ctx := context.Background()
+	client := &http.Client{}
+
+	entry, err := resolveNPMVersion(ctx, client, src.npm)
+	if err != nil {
+		return 0, err
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: npm  %s@%s", entry.Name, entry.Version))
+
+	resp, err := client.Get(entry.Dist.Tarball)
+	if err != nil {
+		return 0, fmt.Errorf("npm tarball download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("npm tarball download failed: %s", resp.Status)
+	}
+
+	var dlBytes int64
+	tracked := &countReader{
+		r: resp.Body,
+		onRead: func(n int64) {
+			dlBytes += n
+			pr.onDL(dlBytes, resp.ContentLength)
+		},
+	}
+
+	hint := filepath.Base(strings.SplitN(entry.Dist.Tarball, "?", 2)[0])
+	if hint == "." || hint == "" || hint == "/" {
+		hint = entry.Name + "-" + entry.Version + ".tgz"
+	}
+
+	br := bufio.NewReaderSize(tracked, 1<<16)
+	format, reader, err := archives.Identify(ctx, hint, br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return 0, fmt.Errorf("identify npm tarball: %w", err)
+	}
+
+	tarballSrc := inputSource{
+		display: src.display,
+		id:      src.id,
+		hint:    hint,
+	}
+	return materializeSource(ctx, tarballSrc, dest, skip, symlinks, downloadOnly, true, pr, format, reader, resp.ContentLength, resp, client, nil)
+}
+
+func resolveNPMVersion(ctx context.Context, client *http.Client, src *npmSource) (npmVersionEntry, error) {
+	u := strings.TrimRight(src.registry, "/") + "/" + url.PathEscape(src.name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return npmVersionEntry{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return npmVersionEntry{}, fmt.Errorf("npm metadata request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return npmVersionEntry{}, fmt.Errorf("npm metadata request failed: %s", resp.Status)
+	}
+
+	var pack npmPackument
+	if err := json.NewDecoder(resp.Body).Decode(&pack); err != nil {
+		return npmVersionEntry{}, fmt.Errorf("parse npm metadata: %w", err)
+	}
+	if len(pack.Versions) == 0 {
+		return npmVersionEntry{}, fmt.Errorf("npm package %s has no versions", src.name)
+	}
+
+	selector := src.selector
+	if selector == "" {
+		selector = pack.DistTags["latest"]
+		if selector == "" {
+			return npmVersionEntry{}, fmt.Errorf("npm package %s does not expose a latest dist-tag", src.name)
+		}
+	}
+	if v, ok := pack.Versions[selector]; ok {
+		if v.Dist.Tarball == "" {
+			return npmVersionEntry{}, fmt.Errorf("npm package %s@%s does not include a tarball URL", src.name, selector)
+		}
+		return v, nil
+	}
+	if version, ok := pack.DistTags[selector]; ok {
+		v, ok := pack.Versions[version]
+		if !ok {
+			return npmVersionEntry{}, fmt.Errorf("npm dist-tag %s resolved to missing version %s", selector, version)
+		}
+		if v.Dist.Tarball == "" {
+			return npmVersionEntry{}, fmt.Errorf("npm package %s@%s does not include a tarball URL", src.name, version)
+		}
+		return v, nil
+	}
+	return npmVersionEntry{}, fmt.Errorf("npm version or dist-tag %q not found for %s", selector, src.name)
+}
+
+func fetchDockerManifest(ctx context.Context, rc *dockerRegistryClient, reference string, platform platformSpec) (*dockerManifest, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rc.url("/manifests/"+reference), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", strings.Join([]string{
 		"application/vnd.oci.image.index.v1+json",
@@ -478,34 +602,94 @@ func fetchDockerManifest(ctx context.Context, rc *dockerRegistryClient, referenc
 
 	resp, err := rc.do(req)
 	if err != nil {
-		return nil, fmt.Errorf("docker manifest request: %w", err)
+		return nil, nil, fmt.Errorf("docker manifest request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("docker manifest request failed: %s", resp.Status)
+		return nil, nil, fmt.Errorf("docker manifest request failed: %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read docker manifest: %w", err)
+		return nil, nil, fmt.Errorf("read docker manifest: %w", err)
 	}
 
 	var manifest dockerManifest
 	if err := json.Unmarshal(body, &manifest); err != nil {
-		return nil, fmt.Errorf("parse docker manifest: %w", err)
+		return nil, nil, fmt.Errorf("parse docker manifest: %w", err)
 	}
 
 	if isDockerManifestList(manifest) {
 		desc, err := pickDockerManifest(manifest.Manifests, platform)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		return fetchDockerManifest(ctx, rc, desc.Digest, platform)
 	}
 	if len(manifest.Layers) == 0 {
-		return nil, fmt.Errorf("unsupported docker manifest type")
+		return nil, nil, fmt.Errorf("unsupported docker manifest type")
 	}
-	return &manifest, nil
+	return &manifest, body, nil
+}
+
+func downloadDockerImage(ctx context.Context, rc *dockerRegistryClient, manifest *dockerManifest, manifestBytes []byte, dest string, pr *printer) (int, error) {
+	pr.onFile("manifest.json", int64(len(manifestBytes)))
+	if err := writeSingleFile(bytes.NewReader(manifestBytes), dest, "manifest.json"); err != nil {
+		return 0, err
+	}
+
+	if manifest.Config.Digest != "" {
+		if err := downloadDockerBlob(ctx, rc, manifest.Config, dest, pr); err != nil {
+			return 0, err
+		}
+	}
+	for _, layer := range manifest.Layers {
+		if err := downloadDockerBlob(ctx, rc, layer, dest, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
+}
+
+func downloadDockerBlob(ctx context.Context, rc *dockerRegistryClient, desc dockerDescriptor, dest string, pr *printer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rc.url("/blobs/"+desc.Digest), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := rc.do(req)
+	if err != nil {
+		return fmt.Errorf("docker blob request %s: %w", desc.Digest, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("docker blob request %s failed: %s", desc.Digest, resp.Status)
+	}
+
+	raw, verify, err := newVerifiedReader(resp.Body, desc.Digest)
+	if err != nil {
+		return err
+	}
+	blobPath, err := dockerBlobOutPath(dest, desc.Digest)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	out, err := os.Create(blobPath)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", blobPath, err)
+	}
+	rel, _ := filepath.Rel(dest, blobPath)
+	pr.onFile(filepath.ToSlash(rel), desc.Size)
+	if _, err := io.Copy(out, raw); err != nil {
+		out.Close()
+		return fmt.Errorf("write %s: %w", blobPath, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", blobPath, err)
+	}
+	return verify()
 }
 
 func applyDockerLayer(ctx context.Context, rc *dockerRegistryClient, layer dockerDescriptor, dest string, skip int, symlinks bool, pr *printer) error {
@@ -1074,6 +1258,19 @@ func singleFileOutPath(dest, name string) (string, error) {
 	return full, nil
 }
 
+func dockerBlobOutPath(dest, digest string) (string, error) {
+	algo, hex, ok := strings.Cut(digest, ":")
+	if !ok || algo == "" || hex == "" {
+		return "", fmt.Errorf("invalid digest %q", digest)
+	}
+	full := filepath.Join(dest, "blobs", algo, hex)
+	cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(full)+string(os.PathSeparator), cleanDest) {
+		return "", fmt.Errorf("path traversal blocked: %s", digest)
+	}
+	return full, nil
+}
+
 func singleFileName(hint, compressionExt string) string {
 	name := filepath.Base(hint)
 	if name == "." || name == "" {
@@ -1107,6 +1304,17 @@ func formatSizeInfo(size int64) string {
 }
 
 func resolveInputSource(arg string) (inputSource, error) {
+	if ns, ok, err := parseNPMSource(arg); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      npmSourceID(ns),
+			hint:    npmHint(ns),
+			npm:     ns,
+		}, nil
+	}
+
 	if ds, ok, err := parseDockerSource(arg); err != nil {
 		return inputSource{}, err
 	} else if ok {
@@ -1161,6 +1369,40 @@ func resolveInputSource(arg string) (inputSource, error) {
 func isRemoteSource(s string) bool {
 	s = strings.ToLower(s)
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func parseNPMSource(raw string) (*npmSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "npm:\\") {
+		raw = "npm://" + raw[len("npm:\\"):]
+		lower = strings.ToLower(raw)
+	}
+	if !strings.HasPrefix(lower, "npm://") {
+		return nil, false, nil
+	}
+	ref := raw[len("npm://"):]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty npm source")
+	}
+
+	name := ref
+	selector := ""
+	if i := strings.LastIndex(ref, "@"); i > 0 {
+		slash := strings.LastIndex(ref, "/")
+		if i > slash {
+			name = ref[:i]
+			selector = ref[i+1:]
+		}
+	}
+	if name == "" {
+		return nil, false, fmt.Errorf("invalid npm source")
+	}
+
+	return &npmSource{
+		registry: "https://registry.npmjs.org",
+		name:     name,
+		selector: selector,
+	}, true, nil
 }
 
 func parseDockerSource(raw string) (*dockerSource, bool, error) {
@@ -1423,6 +1665,25 @@ func shortHash(s string) string {
 
 func dockerSourceID(ds *dockerSource) string {
 	return "docker://" + ds.registry + "/" + ds.repository + "@" + ds.reference
+}
+
+func npmSourceID(ns *npmSource) string {
+	if ns.selector == "" {
+		return "npm://" + ns.name
+	}
+	return "npm://" + ns.name + "@" + ns.selector
+}
+
+func npmHint(ns *npmSource) string {
+	base := filepath.Base(ns.name)
+	base = strings.TrimPrefix(base, "@")
+	if base == "" || base == "." {
+		base = "package"
+	}
+	if ns.selector != "" {
+		return base + "-" + ns.selector + ".tgz"
+	}
+	return base + ".tgz"
 }
 
 func platformKey(src inputSource, raw string) string {

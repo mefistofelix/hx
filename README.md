@@ -1,6 +1,6 @@
 # hx
 
-Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
+Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, npm packages, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
 
 ## Install
 
@@ -16,7 +16,7 @@ hx [flags] <source> [dest]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, Git repository URL, or local file path |
+| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `npm://` package reference, Git repository URL, or local file path |
 | `dest` | no | Destination folder; defaults to current directory; created if absent |
 
 | Flag | Default | Description |
@@ -68,6 +68,19 @@ hx docker://busybox:latest ./out
 # Select a specific image platform from a multi-arch image
 hx -platform linux/amd64 docker://registry.k8s.io/pause:3.9 ./out
 
+# Download a container image without applying its layers
+hx -download-only docker://busybox:latest ./out
+
+# Extract the latest npm package tarball
+hx npm://lodash ./out
+
+# Extract a specific npm version or dist-tag
+hx npm://typescript@5.8.3 ./out
+hx npm://react@next ./out
+
+# Download an npm tarball without extracting it
+hx -download-only npm://@types/node@24.0.0 ./out
+
 # Strip prefix and extract symlinks
 hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
 
@@ -103,6 +116,7 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - Remote sources are keyed by URL.
 - Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
 - Docker sources are keyed by normalized image reference plus selected platform.
+- npm sources are keyed by package name plus the selected version or dist-tag.
 - Local sources are keyed by absolute file path.
 - Changing the source, destination, `-skip`, `-symlinks`, `-download-only`, or Docker `-platform` triggers a fresh extraction/download.
 
@@ -113,12 +127,17 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - **7-Zip**, **RAR** (read-only), and others via [mholt/archives](https://github.com/mholt/archives)
 - **Git repositories** via [go-git](https://github.com/go-git/go-git)
 - **Docker/OCI registry images** fetched directly from the registry HTTP API
+- **npm packages** fetched from the npm registry and resolved to their published tarballs
 
 Format is auto-detected from magic bytes. If no archive/compression format matches, `hx` falls back to copying the source file into `dest`.
 
 For Git sources, `hx` accepts explicit Git clone URLs such as `https://host/org/repo.git`, plus direct GitHub repository URLs like `https://github.com/org/repo`. GitHub archive/release asset URLs such as `/archive/...zip` still stay on the normal HTTP archive path and are not reinterpreted as Git repositories.
 
 For Docker registry sources, use an explicit `docker://` image reference such as `docker://busybox:latest` or `docker://ghcr.io/org/image:tag`. `hx` talks to the registry API directly and streams layers into `dest` without requiring Docker, Podman, or any other local container runtime.
+
+With `-download-only`, Docker registry sources are stored as a simple on-disk layout: `manifest.json` plus the original config/layer blobs under `blobs/<algorithm>/<digest>`, without applying the image filesystem.
+
+For npm sources, use `npm://package`, `npm://package@version`, or `npm://package@dist-tag`. `hx` resolves package metadata from the npm registry, selects the requested version, then downloads the published tarball and handles it like any other remote archive.
 
 ## Streaming design
 
@@ -130,9 +149,10 @@ For Docker registry sources, use an explicit `docker://` image reference such as
 | Single-file compression (`.gz`, `.xz`, ...) | The stream is decompressed and written as a single output file inside `dest`, usually with the compression suffix removed. |
 | Plain files | If no registered format matches, the source is copied into `dest` without extraction. |
 | Local files | Read directly from disk. Local ZIP archives are extracted from the source file itself, so no HTTP buffering/temp-file fallback is involved. |
-| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. |
+| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For npm packages it downloads the published `.tgz` tarball without extracting it. |
+| npm packages | Package metadata is fetched from the npm registry, a version or dist-tag is resolved, then the published tarball is downloaded and extracted or copied with the normal archive/file pipeline. |
 | Git repositories | Cloned into a temp directory with `go-git`, then only the checked-out worktree contents are copied into `dest` without leaving a usable `.git` directory behind. Default branch, branch, and tag downloads use a shallow clone; exact commit downloads may fall back to a broader fetch so the requested commit can be checked out. |
-| Docker registry images | The image manifest is fetched from the registry API, the requested platform is selected, and each layer is streamed and applied directly into `dest` without temp files or a local container runtime. |
+| Docker registry images | The image manifest is fetched from the registry API, the requested platform is selected, and each layer is streamed and applied directly into `dest` without temp files or a local container runtime. With `-download-only`, the selected manifest and original blobs are downloaded instead. |
 
 ## Building
 
