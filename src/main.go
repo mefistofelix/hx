@@ -51,13 +51,17 @@ func (p *pathRuleList) String() string {
 	}
 	items := make([]string, 0, len(*p))
 	for _, rule := range *p {
+		if rule.pattern == "" {
+			items = append(items, rule.raw)
+			continue
+		}
 		items = append(items, rule.raw)
 	}
-	return strings.Join(items, ",")
+	return strings.Join(items, ":")
 }
 
 func (p *pathRuleList) Set(value string) error {
-	for _, item := range strings.Split(value, ",") {
+	for _, item := range strings.FieldsFunc(value, func(r rune) bool { return r == ':' || r == ',' }) {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
@@ -68,14 +72,21 @@ func (p *pathRuleList) Set(value string) error {
 			include = true
 		case '-':
 		default:
-			return fmt.Errorf("invalid path selector %q, expected +pattern or -pattern", item)
+			return fmt.Errorf("invalid incexc selector %q, expected +pattern, -pattern, :+, or :-", item)
+		}
+		if len(item) == 1 {
+			*p = append(*p, pathRule{
+				include: include,
+				raw:     item,
+			})
+			continue
 		}
 		pattern := normalizeSelectorPattern(item[1:])
 		if pattern == "" {
-			return fmt.Errorf("empty path selector %q", item)
+			return fmt.Errorf("empty incexc selector %q", item)
 		}
 		if _, err := doublestar.Match(pattern, "probe"); err != nil {
-			return fmt.Errorf("invalid path selector %q: %w", item, err)
+			return fmt.Errorf("invalid incexc selector %q: %w", item, err)
 		}
 		*p = append(*p, pathRule{
 			include: include,
@@ -216,8 +227,7 @@ func main() {
 	flag.StringVar(&registry, "reg", "", "alias for -registry")
 	flag.StringVar(&target, "target", "", "repository-specific target selector such as bionic, v3.22, 42, or net8.0")
 	flag.StringVar(&target, "t", "", "alias for -target")
-	flag.Var(&activePathRules, "paths", "comma-separated +include/-exclude path selectors relative to dest root (supports doublestar)")
-	flag.Var(&activePathRules, "path", "alias for -paths")
+	flag.Var(&activePathRules, "incexc", "colon-separated +include/-exclude selectors relative to dest root, supports doublestar, with optional :+ or :- fallback")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
@@ -3726,22 +3736,17 @@ func selectorPath(name string, skip int) string {
 	return filepath.ToSlash(filepath.Join(parts...))
 }
 
-func (p pathRuleList) hasIncludes() bool {
-	for _, rule := range p {
-		if rule.include {
-			return true
-		}
-	}
-	return false
-}
-
 func (p pathRuleList) allows(rel string) bool {
 	rel = normalizeSelectorPattern(rel)
 	if rel == "" || len(p) == 0 {
 		return true
 	}
-	allowed := !p.hasIncludes()
+	allowed := true
 	for _, rule := range p {
+		if rule.pattern == "" {
+			allowed = rule.include
+			continue
+		}
 		match, err := doublestar.Match(rule.pattern, rel)
 		if err != nil {
 			continue
