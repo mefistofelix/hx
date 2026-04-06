@@ -29,6 +29,7 @@ hx [flags] <source> [dest]
 | `-platform OS/ARCH[/VARIANT]`, `-plat ...` | `linux/<host-arch>` | Platform selector for Docker registry images and WinGet installer architecture selection, and the base OS/arch hint for source types that care about platform, for example `linux/amd64` |
 | `-registry VALUE`, `-reg VALUE` | auto | Override the registry/repository base for Docker, NuGet, WinGet, PyPI, npm, APT, RPM, or APK sources |
 | `-target VALUE`, `-t VALUE` | auto | Repository-specific target selector such as `bionic`, `v3.22`, `42`, or `net8.0` for source types that support it |
+| `-paths LIST`, `-path LIST` | none | Comma-separated `+include` / `-exclude` path selectors relative to the destination root, with doublestar support such as `+bin/**,-**/*.pdb` |
 
 Flags must be placed before `source`.
 
@@ -145,6 +146,9 @@ hx -q 1 -strip 1 https://example.com/repo.tar.gz ./out
 
 # Force in-memory ZIP buffer for a non-Range HTTP server
 hx -notmp 1 https://example.com/repo.zip ./out
+
+# Extract only a subset of paths from an archive or package payload
+hx -strip 1 -paths "+hello/**,-hello/reverse/**" https://example.com/repo.tar.gz ./out
 ```
 
 ## Output
@@ -167,7 +171,7 @@ done  14970 files  138.2 MB  (4.1s)
 
 ## Idempotency
 
-After a successful extraction/download `hx` writes a sentinel file in the destination. On subsequent runs with the same source, destination, `-strip`, `-symlinks`, `-download-only`, and Docker `-platform` values it prints `already extracted, skipping` and exits 0 immediately.
+After a successful extraction/download `hx` writes a sentinel file in the destination. On subsequent runs with the same source, destination, `-strip`, `-symlinks`, `-download-only`, Docker `-platform`, and `-paths` values it prints `already extracted, skipping` and exits 0 immediately.
 
 - Remote sources are keyed by URL.
 - Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
@@ -181,7 +185,7 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - APK sources are keyed by normalized repository base plus package name/version and selected repository target.
 - Local sources are keyed by absolute file path.
 - Changing the source, destination, `-strip`, `-symlinks`, `-download-only`, or `-platform` triggers a fresh extraction/download.
-- Changing `-registry` or `-target` for a source type that uses them also triggers a fresh extraction/download.
+- Changing `-registry`, `-target`, or `-paths` also triggers a fresh extraction/download when they affect the materialized output.
 
 ## Supported formats
 
@@ -199,6 +203,8 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - **Alpine APK packages** resolved from `APKINDEX.tar.gz`, including transitive dependencies
 
 Format is auto-detected from magic bytes. If no archive/compression format matches, `hx` falls back to copying the source file into `dest`.
+
+When `-paths` is set, selectors are evaluated relative to the destination root after path stripping. Rules are ordered, support doublestar globs, and use `+` for inclusion and `-` for exclusion. If at least one `+` rule is present, unmatched extracted paths are skipped by default.
 
 For Git sources, `hx` accepts explicit Git clone URLs such as `https://host/org/repo.git`, plus direct GitHub repository URLs like `https://github.com/org/repo`. GitHub archive/release asset URLs such as `/archive/...zip` still stay on the normal HTTP archive path and are not reinterpreted as Git repositories.
 
@@ -233,6 +239,7 @@ For HTTPS sources, if certificate verification fails, `hx` emits a warning and r
 | Plain files | If no registered format matches, the source is copied into `dest` without extraction. |
 | Local files | Read directly from disk. Local ZIP archives are extracted from the source file itself, so no HTTP buffering/temp-file fallback is involved. |
 | `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For NuGet packages it downloads the resolved `.nupkg` files without extracting them. For WinGet packages it downloads the resolved installer artifacts without extracting them. For PyPI packages it downloads the resolved wheel/sdist artifacts without extracting them. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. For RPM and APK sources it downloads the resolved package files without unpacking them. |
+| Path selectors | `-paths` / `-path` filtering is applied to extracted paths across archive, Docker layer, package, Git worktree, and single-file decompression code paths. Download-only outputs are not filtered. |
 | NuGet packages | The NuGet V3 service index is fetched, the flat container is used to resolve versions, the best matching dependency group is selected from the `.nuspec`, then each `.nupkg` is downloaded and extracted or copied with the normal archive/file pipeline. |
 | WinGet packages | The WinGet manifests repository is queried through the GitHub contents API, the selected version manifest is parsed, an installer matching the selected architecture is chosen, then the referenced installer artifact is downloaded and extracted or copied with the normal archive/file pipeline. |
 | PyPI packages | The PyPI JSON API is fetched for the selected project/release, `requires_dist` is traversed recursively, then each selected wheel or sdist is downloaded and extracted or copied with the normal archive/file pipeline. |

@@ -44,6 +44,7 @@ $PRED = @{
     '06' = 25   # alpine tgz -symlinks 1: Windows privilege error fast path
     '07' = 40   # KEY: 200 MB uncompressed src files, streaming keeps peak flat (~28 MB observed)
     '08' = 50   # KEY: 83 MB zip via Range; only central directory + active file in memory (~29 MB observed)
+    '09' = 30   # small tgz with path selectors: same streaming profile as other tiny tarballs
 }
 
 # -- Helper -------------------------------------------------------------------
@@ -184,6 +185,9 @@ $results.Add((Run-Test '07 large tgz 30MB stream'   '07' @('-strip','1',$URL_LAR
 # 08 - KEY: large zip ~68 MB via HTTP Range (go.dev supports Accept-Ranges)
 #      only central directory + active file in memory, not the full 68 MB
 $results.Add((Run-Test '08 large zip 68MB Range'    '08' @('-strip','1',$URL_LARGE_ZIP,"$TMP\t08") "$TMP\t08"))
+
+# 09 - small tgz with doublestar path selectors
+$results.Add((Run-Test '09 small tgz paths filter'  '09' @('-strip','1','-paths','+**/hello.go',$URL_SMALL_TGZ,"$TMP\t09") "$TMP\t09"))
 
 # -- Results table ------------------------------------------------------------
 $w = 30

@@ -3,6 +3,7 @@ module hx
 go 1.26.1
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.9.1
 	github.com/go-git/go-git/v5 v5.17.2
 	github.com/mholt/archives v0.1.5
 	github.com/sassoftware/go-rpmutils v0.4.0

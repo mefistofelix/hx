@@ -65,6 +65,7 @@ PRED_MB['05']=30   # alpine tgz: symlinks skipped, runtime + gzip
 PRED_MB['06']=25   # alpine tgz -symlinks 1: symlinks extracted on Linux
 PRED_MB['07']=40   # KEY: 200 MB uncompressed src files, streaming keeps peak flat (~28 MB observed)
 PRED_MB['08']=50   # KEY: 83 MB zip via Range; only central directory + active file in memory
+PRED_MB['09']=30   # small tgz with path selectors: same streaming profile as other tiny tarballs
 
 # ── Result storage (parallel arrays) ──────────────────────────────────────────
 T_LABELS=(); T_PASS=(); T_EXIT=(); T_TIME=(); T_MEM=(); T_FILES=(); T_LINKS=(); T_OUT=()
@@ -173,6 +174,9 @@ run_test '07 large tgz 30MB stream'   '07' -strip 1 "$URL_LARGE_TGZ" "$TMP/07"
 # 08 KEY: large zip ~68 MB, fetched via HTTP Range (go.dev supports Accept-Ranges)
 #    only central directory + active file in memory, not full 68 MB
 run_test '08 large zip 68MB Range'    '08' -strip 1 "$URL_LARGE_ZIP" "$TMP/08"
+
+# 09 small tar.gz with doublestar path selectors
+run_test '09 small tgz paths filter'  '09' -strip 1 -paths '+**/hello.go' "$URL_SMALL_TGZ" "$TMP/09"
 
 # ── Results table ──────────────────────────────────────────────────────────────
 printf '\n%-30s %-6s %-5s %-8s %-14s %-7s %-7s %s\n' \

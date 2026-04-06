@@ -6,7 +6,7 @@
 
 ## Purpose
 
-`hx` fetches and extracts artifacts from HTTP(S) URLs, Docker registry images, NuGet packages, WinGet manifests, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It supports single-file compression formats like `.gz`, can download sources without extracting them, and falls back to copying plain files when the source is not an archive. It can strip leading path segments, skips symlinks by default for safety, and ships as a statically linked binary with no runtime dependencies beyond the standard library plus `mholt/archives`, `go-git`, `go-rpmutils`, and `go.yaml.in/yaml/v4`.
+`hx` fetches and extracts artifacts from HTTP(S) URLs, Docker registry images, NuGet packages, WinGet manifests, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It supports single-file compression formats like `.gz`, can download sources without extracting them, can filter extracted paths with doublestar selectors, and falls back to copying plain files when the source is not an archive. It can strip leading path segments, skips symlinks by default for safety, and ships as a statically linked binary with no runtime dependencies beyond the standard library plus `mholt/archives`, `go-git`, `doublestar`, `go-rpmutils`, and `go.yaml.in/yaml/v4`.
 
 ## Usage
 
@@ -29,6 +29,7 @@ hx [flags] <source> [dest]
 | `-platform OS/ARCH[/VARIANT]`, `-plat ...` | `linux/<host-arch>` | Platform selector for Docker registry images and WinGet installer architecture selection, and the base OS/arch hint for source types that care about platform, for example `linux/amd64` |
 | `-registry VALUE`, `-reg VALUE` | auto | Override the registry/repository base for Docker, NuGet, WinGet, PyPI, npm, APT, RPM, or APK sources |
 | `-target VALUE`, `-t VALUE` | auto | Repository-specific target selector such as `bionic`, `v3.22`, `42`, or `net8.0` for source types that support it |
+| `-paths LIST`, `-path LIST` | none | Comma-separated `+include` / `-exclude` path selectors relative to the destination root, with doublestar support such as `+bin/**,-**/*.pdb` |
 
 Flags must be placed before `source`.
 
@@ -115,6 +116,9 @@ hx -do 1 apk://curl ./out
 
 # Enable symlink extraction
 hx -strip 1 -symlinks 1 https://example.com/repo.tar.gz ./out
+
+# Extract only a subset of paths from an archive or package payload
+hx -strip 1 -paths "+hello/**,-hello/reverse/**" https://example.com/repo.tar.gz ./out
 ```
 
 ## Done-file / idempotency
@@ -138,7 +142,8 @@ After a successful extraction `hx` writes:
 - Local sources use the absolute file path as the source ID.
 - `-quiet`/`-q` and `-notmp` are excluded because they do not affect extracted content.
 - `-download-only` is included because it changes the produced output.
-- Changing `-registry` or `-target` for a source type that uses them produces a different sentinel.
+- `-paths` is included because it changes which extracted paths are materialized.
+- Changing `-registry`, `-target`, or `-paths` for a source type that uses them produces a different sentinel.
 
 ## Output
 
@@ -178,6 +183,8 @@ All formats recognized by [github.com/mholt/archives](https://github.com/mholt/a
 
 Format is auto-detected from magic bytes first, with the source basename used as a hint when needed.
 
+When `-paths` is set, selectors are evaluated relative to the destination root after path stripping. Rules are ordered, support doublestar globs, and use `+` for inclusion and `-` for exclusion. If at least one `+` rule is present, unmatched extracted paths are skipped by default.
+
 For Docker registry sources, use an explicit `docker://` image reference such as `docker://busybox:latest` or `docker://ghcr.io/org/image:tag`. `hx` talks to the registry API directly and does not require Docker, Podman, or any other local container runtime.
 
 With `-download-only`, Docker registry sources are saved as a simple on-disk layout: `manifest.json` plus the original config/layer blobs under `blobs/<algorithm>/<digest>`, without applying the image filesystem.
@@ -211,6 +218,7 @@ For Git sources, `hx` accepts explicit clone URLs such as `https://host/org/repo
 | Plain files | Copy the source file into `dest` unchanged |
 | Local archives | Source file is opened directly; local ZIP extraction reads from the file itself |
 | `-download-only` | Copy the original source bytes into `dest` without extraction. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For NuGet packages it downloads the resolved `.nupkg` files without extracting them. For WinGet packages it downloads the resolved installer artifacts without extracting them. For PyPI packages it downloads the resolved wheel/sdist artifacts without extracting them. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. For RPM and APK sources it downloads the resolved package files without unpacking them |
+| Path selectors | `-paths` / `-path` filtering is applied to extracted paths across archive, Docker layer, package, Git worktree, and single-file decompression code paths. Download-only outputs are not filtered. |
 | Docker registry images | Fetch the manifest from the registry API, select the requested platform, then stream and apply each layer directly into `dest` without temp files |
 | NuGet packages | Fetch the NuGet V3 service index, resolve versions via the flat container, select the best matching dependency group from `.nuspec`, then download and extract or copy each `.nupkg` |
 | WinGet packages | Query the WinGet manifests repository through the GitHub contents API, parse the selected version manifest, choose an installer for the selected architecture, then download and extract or copy the installer artifact |
@@ -279,6 +287,7 @@ The test scripts always build `hx` first through `build.ps1` or `build.sh`, so t
 - Local ZIP handling rewinds the opened file and extracts directly from disk.
 - Git branch and tag downloads use shallow clone options where possible; exact commit downloads may need a broader fetch before detached checkout.
 - Formats that implement `archives.Decompressor` but not `archives.Extractor` are written as a single output file.
+- `-paths` selectors are matched with doublestar semantics against paths relative to the destination root after `-strip` has been applied.
 - If `archives.Identify` returns `NoMatch`, the source is copied into `dest` as a plain file.
 - `-download-only` short-circuits format handling and writes the original source file as-is.
 - HTTPS downloads retry insecurely with a warning if TLS certificate verification fails.

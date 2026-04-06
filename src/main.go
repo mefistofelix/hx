@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/mholt/archives"
@@ -33,6 +34,57 @@ import (
 )
 
 var errUnsupportedWindowsPath = errors.New("unsupported Windows path")
+
+var activePathRules pathRuleList
+
+type pathRule struct {
+	include bool
+	pattern string
+	raw     string
+}
+
+type pathRuleList []pathRule
+
+func (p *pathRuleList) String() string {
+	if p == nil || len(*p) == 0 {
+		return ""
+	}
+	items := make([]string, 0, len(*p))
+	for _, rule := range *p {
+		items = append(items, rule.raw)
+	}
+	return strings.Join(items, ",")
+}
+
+func (p *pathRuleList) Set(value string) error {
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		include := false
+		switch item[0] {
+		case '+':
+			include = true
+		case '-':
+		default:
+			return fmt.Errorf("invalid path selector %q, expected +pattern or -pattern", item)
+		}
+		pattern := normalizeSelectorPattern(item[1:])
+		if pattern == "" {
+			return fmt.Errorf("empty path selector %q", item)
+		}
+		if _, err := doublestar.Match(pattern, "probe"); err != nil {
+			return fmt.Errorf("invalid path selector %q: %w", item, err)
+		}
+		*p = append(*p, pathRule{
+			include: include,
+			pattern: pattern,
+			raw:     string(item[0]) + pattern,
+		})
+	}
+	return nil
+}
 
 type inputSource struct {
 	display string
@@ -164,6 +216,8 @@ func main() {
 	flag.StringVar(&registry, "reg", "", "alias for -registry")
 	flag.StringVar(&target, "target", "", "repository-specific target selector such as bionic, v3.22, 42, or net8.0")
 	flag.StringVar(&target, "t", "", "alias for -target")
+	flag.Var(&activePathRules, "paths", "comma-separated +include/-exclude path selectors relative to dest root (supports doublestar)")
+	flag.Var(&activePathRules, "path", "alias for -paths")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
@@ -174,9 +228,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "flags:")
 		flag.PrintDefaults()
 	}
-	flag.Parse()
+	if err := flag.CommandLine.Parse(normalizeFlagArgs(os.Args[1:])); err != nil {
+		os.Exit(2)
+	}
 
-	args := flag.Args()
+	args := flag.CommandLine.Args()
 	if len(args) < 1 {
 		flag.Usage()
 		os.Exit(1)
@@ -206,7 +262,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	doneFile := filepath.Join(dest, doneFileName(src.id, strip, symlinks, downloadOnly, platformKey(src, platform)))
+	selectorKey := ""
+	if !downloadOnly {
+		selectorKey = activePathRules.key()
+	}
+	doneFile := filepath.Join(dest, doneFileName(src.id, strip, symlinks, downloadOnly, platformKey(src, platform), selectorKey))
 	if _, err := os.Stat(doneFile); err == nil {
 		fmt.Println("already extracted, skipping")
 		return
@@ -276,12 +336,37 @@ func (b *bool01Value) Set(s string) error {
 	}
 }
 
-func (b *bool01Value) IsBoolFlag() bool {
-	return true
-}
-
 func registerBool01(name string, target *bool, usage string) {
 	flag.Var(&bool01Value{target: target}, name, usage)
+}
+
+func normalizeFlagArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	boolFlags := map[string]bool{
+		"-symlinks":      true,
+		"-quiet":         true,
+		"-q":             true,
+		"-download-only": true,
+		"-do":            true,
+		"-notmp":         true,
+		"-no-tempfile":   true,
+	}
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if boolFlags[arg] && i+1 < len(args) {
+			next := args[i+1]
+			if next == "0" || next == "1" {
+				out = append(out, arg+"="+next)
+				i++
+				continue
+			}
+		}
+		out = append(out, arg)
+	}
+	return out
 }
 
 func newPrinter(ansi bool) *printer {
@@ -2707,6 +2792,9 @@ func extractAPK(r io.Reader, dest string, skip int, symlinks bool, pr *printer) 
 				pr.warn(fmt.Sprintf("skipping unsupported Windows path from apk payload: %s", name))
 				continue
 			}
+			if !allowsSelectedPath(name, skip) {
+				continue
+			}
 			if !symlinks {
 				continue
 			}
@@ -2717,6 +2805,9 @@ func extractAPK(r io.Reader, dest string, skip int, symlinks bool, pr *printer) 
 		case tar.TypeReg, tar.TypeRegA:
 			if unsupportedWindowsPath(name, skip) {
 				pr.warn(fmt.Sprintf("skipping unsupported Windows path from apk payload: %s", name))
+				continue
+			}
+			if !allowsSelectedPath(name, skip) {
 				continue
 			}
 			pr.onFile(name, hdr.Size)
@@ -2816,6 +2907,9 @@ func extractRPM(r io.Reader, dest string, skip int, symlinks bool, pr *printer) 
 				pr.warn(fmt.Sprintf("skipping unsupported Windows path from rpm payload: %s", info.Name()))
 				continue
 			}
+			if !allowsSelectedPath(info.Name(), skip) {
+				continue
+			}
 			if !symlinks {
 				continue
 			}
@@ -2826,6 +2920,9 @@ func extractRPM(r io.Reader, dest string, skip int, symlinks bool, pr *printer) 
 		case rpmcpio.S_ISREG:
 			if unsupportedWindowsPath(info.Name(), skip) {
 				pr.warn(fmt.Sprintf("skipping unsupported Windows path from rpm payload: %s", info.Name()))
+				continue
+			}
+			if !allowsSelectedPath(info.Name(), skip) {
 				continue
 			}
 			if payload.IsLink() {
@@ -3206,6 +3303,9 @@ func materializeSource(
 
 	if format == nil {
 		name := singleFileName(src.hint, "")
+		if !activePathRules.allows(name) {
+			return 0, nil
+		}
 		pr.onFile(name, size)
 		return 1, writeSingleFile(reader, dest, name)
 	}
@@ -3237,11 +3337,17 @@ func materializeSource(
 		defer rc.Close()
 
 		name := singleFileName(src.hint, format.Extension())
+		if !activePathRules.allows(name) {
+			return 0, nil
+		}
 		pr.onFile(name, -1)
 		return 1, writeSingleFile(rc, dest, name)
 	}
 
 	name := singleFileName(src.hint, "")
+	if !activePathRules.allows(name) {
+		return 0, nil
+	}
 	pr.onFile(name, size)
 	return 1, writeSingleFile(reader, dest, name)
 }
@@ -3320,6 +3426,9 @@ func extractLocalZip(ctx context.Context, f *os.File, handler archives.FileHandl
 
 func handleEntry(f archives.FileInfo, dest string, skip int, allowSymlinks bool, pr *printer) error {
 	if f.IsDir() {
+		return nil
+	}
+	if !allowsSelectedPath(f.NameInArchive, skip) {
 		return nil
 	}
 	if f.LinkTarget != "" {
@@ -3412,6 +3521,12 @@ func copyGitWorktree(srcRoot, dest string, allowSymlinks bool, pr *printer) (int
 		}
 
 		target := filepath.Join(dest, rel)
+		if !activePathRules.allows(filepath.ToSlash(rel)) {
+			if info.IsDir() {
+				return nil
+			}
+			return nil
+		}
 		cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
 		if !strings.HasPrefix(filepath.Clean(target)+string(os.PathSeparator), cleanDest) {
 			return fmt.Errorf("path traversal blocked: %s", rel)
@@ -3544,7 +3659,7 @@ func (r *httpRangeReader) ReadAt(p []byte, off int64) (int, error) {
 	return n, err
 }
 
-func doneFileName(sourceID string, skip int, symlinks, downloadOnly bool, platform string) string {
+func doneFileName(sourceID string, skip int, symlinks, downloadOnly bool, platform, selectors string) string {
 	sl := 0
 	if symlinks {
 		sl = 1
@@ -3557,7 +3672,11 @@ func doneFileName(sourceID string, skip int, symlinks, downloadOnly bool, platfo
 	if platform != "" {
 		pf = "-plat" + sanitizeForFilename(platform)
 	}
-	return fmt.Sprintf("hx-%s-skip%d-sym%d-dl%d%sargs.done", sanitizeForFilename(sourceID), skip, sl, dl, pf)
+	sf := ""
+	if selectors != "" {
+		sf = "-paths" + sanitizeForFilename(selectors)
+	}
+	return fmt.Sprintf("hx-%s-skip%d-sym%d-dl%d%s%sargs.done", sanitizeForFilename(sourceID), skip, sl, dl, pf, sf)
 }
 
 func sanitizeForFilename(s string) string {
@@ -3592,9 +3711,67 @@ func entryParts(nameInArchive string, skip int) []string {
 	return parts[skip:]
 }
 
+func normalizeSelectorPattern(pattern string) string {
+	pattern = strings.TrimSpace(pattern)
+	pattern = strings.TrimPrefix(pattern, "./")
+	pattern = strings.TrimLeft(filepath.ToSlash(pattern), "/")
+	return pattern
+}
+
+func selectorPath(name string, skip int) string {
+	parts := entryParts(name, skip)
+	if len(parts) == 0 {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Join(parts...))
+}
+
+func (p pathRuleList) hasIncludes() bool {
+	for _, rule := range p {
+		if rule.include {
+			return true
+		}
+	}
+	return false
+}
+
+func (p pathRuleList) allows(rel string) bool {
+	rel = normalizeSelectorPattern(rel)
+	if rel == "" || len(p) == 0 {
+		return true
+	}
+	allowed := !p.hasIncludes()
+	for _, rule := range p {
+		match, err := doublestar.Match(rule.pattern, rel)
+		if err != nil {
+			continue
+		}
+		if match {
+			allowed = rule.include
+		}
+	}
+	return allowed
+}
+
+func (p pathRuleList) key() string {
+	if len(p) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(p.String()))
+	return fmt.Sprintf("%x", sum[:6])
+}
+
+func allowsSelectedPath(name string, skip int) bool {
+	return activePathRules.allows(selectorPath(name, skip))
+}
+
 func outPath(dest, nameInArchive string, skip int) (string, error) {
 	parts := entryParts(nameInArchive, skip)
 	if len(parts) == 0 {
+		return "", nil
+	}
+	rel := filepath.ToSlash(filepath.Join(parts...))
+	if !activePathRules.allows(rel) {
 		return "", nil
 	}
 	if runtime.GOOS == "windows" {
@@ -3604,11 +3781,11 @@ func outPath(dest, nameInArchive string, skip int) (string, error) {
 			}
 		}
 	}
-	rel := filepath.Join(parts...)
-	if rel == "" || rel == "." {
+	fullRel := filepath.Join(parts...)
+	if fullRel == "" || fullRel == "." {
 		return "", nil
 	}
-	full := filepath.Join(dest, rel)
+	full := filepath.Join(dest, fullRel)
 	cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
 	if !strings.HasPrefix(filepath.Clean(full)+string(os.PathSeparator), cleanDest) {
 		return "", fmt.Errorf("path traversal blocked: %s", nameInArchive)
@@ -3620,6 +3797,9 @@ func singleFileOutPath(dest, name string) (string, error) {
 	base := filepath.Base(name)
 	if base == "." || base == string(os.PathSeparator) || base == "" {
 		base = "download"
+	}
+	if !activePathRules.allows(base) {
+		return "", nil
 	}
 	full := filepath.Join(dest, base)
 	cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
@@ -5111,6 +5291,7 @@ func handleLayerEntry(f archives.FileInfo, dest string, skip int, allowSymlinks 
 
 	base := parts[len(parts)-1]
 	parent := parts[:len(parts)-1]
+	rel := filepath.ToSlash(filepath.Join(parts...))
 
 	switch {
 	case base == ".wh..wh..opq":
@@ -5140,19 +5321,25 @@ func handleLayerEntry(f archives.FileInfo, dest string, skip int, allowSymlinks 
 		}
 		return os.MkdirAll(path, 0o755)
 	}
+	if !activePathRules.allows(rel) {
+		return nil
+	}
 	if f.LinkTarget != "" {
 		if !allowSymlinks {
 			return nil
 		}
-		pr.onFile(filepath.ToSlash(filepath.Join(parts...)), -1)
+		pr.onFile(rel, -1)
 		return writeSymlink(f, dest, skip)
 	}
-	pr.onFile(filepath.ToSlash(filepath.Join(parts...)), f.Size())
+	pr.onFile(rel, f.Size())
 	return writeRegularFile(f, dest, skip)
 }
 
 func outPathFromParts(dest string, parts []string) (string, error) {
 	if len(parts) == 0 {
+		return "", nil
+	}
+	if !activePathRules.allows(filepath.ToSlash(filepath.Join(parts...))) {
 		return "", nil
 	}
 	full := filepath.Join(append([]string{dest}, parts...)...)
