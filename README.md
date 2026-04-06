@@ -1,6 +1,6 @@
 # hx
 
-Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
+Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, NuGet packages, WinGet manifests, PyPI packages, npm packages, APT repositories, RPM repositories, Alpine APK repositories, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
 
 ## Install
 
@@ -16,7 +16,7 @@ hx [flags] <source> [dest]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `pypi://` package reference, `npm://` package reference, `apt://` package reference, `rpm://` package reference, `apk://` package reference, Git repository URL, or local file path |
+| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, `nuget://` package reference, `winget://` package reference, `pypi://` package reference, `npm://` package reference, `apt://` package reference, `rpm://` package reference, `apk://` package reference, Git repository URL, or local file path |
 | `dest` | no | Destination folder; defaults to current directory; created if absent |
 
 | Flag | Default | Description |
@@ -26,8 +26,8 @@ hx [flags] <source> [dest]
 | `-quiet` | off | Plain text output instead of rich ANSI progress |
 | `-download-only` | off | Download/copy the original source file without extracting or decompressing it |
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
-| `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images, for example `linux/amd64` |
-| `-registry VALUE` | auto | Override the registry/repository base for Docker, PyPI, npm, APT, RPM, or APK sources |
+| `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images and WinGet installer architecture selection, and the base OS/arch hint for source types that care about platform, for example `linux/amd64` |
+| `-registry VALUE` | auto | Override the registry/repository base for Docker, NuGet, WinGet, PyPI, npm, APT, RPM, or APK sources |
 
 Flags must be placed before `source`.
 
@@ -71,6 +71,24 @@ hx -platform linux/amd64 docker://registry.k8s.io/pause:3.9 ./out
 
 # Download a container image without applying its layers
 hx -download-only docker://busybox:latest ./out
+
+# Extract the latest NuGet package plus its dependencies
+hx nuget://Newtonsoft.Json ./out
+
+# Extract a specific NuGet version
+hx nuget://Newtonsoft.Json@13.0.3 ./out
+
+# Download the resolved NuGet packages without extracting them
+hx -download-only nuget://Newtonsoft.Json ./out
+
+# Download the latest WinGet installer for the selected architecture
+hx winget://Microsoft.VisualStudioCode ./out
+
+# Pin a WinGet version and architecture
+hx -platform linux/amd64 winget://Microsoft.VisualStudioCode@1.105.1 ./out
+
+# Download a WinGet installer without extracting it
+hx -download-only winget://Microsoft.VisualStudioCode ./out
 
 # Extract the latest npm package tarball
 hx npm://lodash ./out
@@ -150,6 +168,8 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - Remote sources are keyed by URL.
 - Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
 - Docker sources are keyed by normalized image reference plus selected platform.
+- NuGet sources are keyed by normalized package name plus the selected version when pinned.
+- WinGet sources are keyed by normalized package identifier plus the selected version when pinned.
 - PyPI sources are keyed by normalized package name plus the selected version when pinned.
 - npm sources are keyed by package name plus the selected version or dist-tag.
 - APT sources are keyed by package name/version plus the selected repository release selector.
@@ -165,6 +185,8 @@ After a successful extraction/download `hx` writes a sentinel file in the destin
 - **7-Zip**, **RAR** (read-only), and others via [mholt/archives](https://github.com/mholt/archives)
 - **Git repositories** via [go-git](https://github.com/go-git/go-git)
 - **Docker/OCI registry images** fetched directly from the registry HTTP API
+- **NuGet packages** resolved from the NuGet V3 service index and flat container
+- **WinGet packages** resolved from WinGet YAML manifests and downloaded from the referenced installer URLs
 - **PyPI packages** resolved from the PyPI JSON API, including transitive dependencies from `requires_dist`
 - **npm packages** fetched from the npm registry and resolved to their published tarballs
 - **APT packages** resolved from a repository `Packages` index, including transitive dependencies
@@ -178,6 +200,10 @@ For Git sources, `hx` accepts explicit Git clone URLs such as `https://host/org/
 For Docker registry sources, use an explicit `docker://` image reference such as `docker://busybox:latest`. Use `-registry` to override the registry host, for example `-registry ghcr.io docker://org/image:tag`. `hx` talks to the registry API directly and streams layers into `dest` without requiring Docker, Podman, or any other local container runtime.
 
 With `-download-only`, Docker registry sources are stored as a simple on-disk layout: `manifest.json` plus the original config/layer blobs under `blobs/<algorithm>/<digest>`, without applying the image filesystem.
+
+For NuGet sources, use `nuget://package` or `nuget://package@version`. By default `hx` uses the NuGet V3 service index at `https://api.nuget.org/v3/index.json`. Use `-registry` to point at a different NuGet V3 service index, and optionally use the registry fragment to force a target framework selector such as `#net8.0`, `#netstandard2.0`, or `#dotnetcore`. `-platform` remains an OS/arch selector and is not used to encode the .NET framework version. `hx` resolves the latest version from the flat container when needed, selects the most appropriate dependency group from the package `.nuspec`, then downloads the `.nupkg` files and extracts them like ZIP archives.
+
+For WinGet sources, use `winget://Package.Identifier` or `winget://Package.Identifier@version`. By default `hx` uses the GitHub API view of `microsoft/winget-pkgs`. Use `-registry` to point at a different GitHub manifests API root, or a GitHub repository URL that can be normalized to one. `hx` resolves the selected manifest version, chooses an installer matching `-platform` architecture, follows package dependencies declared in the manifest when present, then downloads the referenced installer artifacts and handles them like any other source.
 
 For PyPI sources, use `pypi://package` or `pypi://package@version`. By default `hx` uses `https://pypi.org/pypi`. Use `-registry` to point at a different JSON-compatible PyPI registry base. `hx` resolves the selected release, follows `requires_dist` recursively in a conservative way, then prefers a wheel artifact and falls back to an sdist when needed.
 
@@ -201,7 +227,9 @@ For HTTPS sources, if certificate verification fails, `hx` emits a warning and r
 | Single-file compression (`.gz`, `.xz`, ...) | The stream is decompressed and written as a single output file inside `dest`, usually with the compression suffix removed. |
 | Plain files | If no registered format matches, the source is copied into `dest` without extraction. |
 | Local files | Read directly from disk. Local ZIP archives are extracted from the source file itself, so no HTTP buffering/temp-file fallback is involved. |
-| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For PyPI packages it downloads the resolved wheel/sdist artifacts without extracting them. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. For RPM and APK sources it downloads the resolved package files without unpacking them. |
+| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. For Docker registry images it downloads `manifest.json` plus the referenced blobs instead of applying the layers. For NuGet packages it downloads the resolved `.nupkg` files without extracting them. For WinGet packages it downloads the resolved installer artifacts without extracting them. For PyPI packages it downloads the resolved wheel/sdist artifacts without extracting them. For npm packages it downloads the published `.tgz` tarball without extracting it. For APT sources it downloads the resolved `.deb` files without unpacking them. For RPM and APK sources it downloads the resolved package files without unpacking them. |
+| NuGet packages | The NuGet V3 service index is fetched, the flat container is used to resolve versions, the best matching dependency group is selected from the `.nuspec`, then each `.nupkg` is downloaded and extracted or copied with the normal archive/file pipeline. |
+| WinGet packages | The WinGet manifests repository is queried through the GitHub contents API, the selected version manifest is parsed, an installer matching the selected architecture is chosen, then the referenced installer artifact is downloaded and extracted or copied with the normal archive/file pipeline. |
 | PyPI packages | The PyPI JSON API is fetched for the selected project/release, `requires_dist` is traversed recursively, then each selected wheel or sdist is downloaded and extracted or copied with the normal archive/file pipeline. |
 | npm packages | Package metadata is fetched from the npm registry, a version or dist-tag is resolved, then the published tarball is downloaded and extracted or copied with the normal archive/file pipeline. |
 | APT repositories | The repository `Packages` index is fetched, a package plus its dependencies are resolved, then each `.deb` is downloaded and extracted or copied with the normal archive/file pipeline. |

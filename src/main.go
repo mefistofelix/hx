@@ -29,6 +29,7 @@ import (
 	"github.com/mholt/archives"
 	rpmutils "github.com/sassoftware/go-rpmutils"
 	rpmcpio "github.com/sassoftware/go-rpmutils/cpio"
+	"go.yaml.in/yaml/v4"
 )
 
 var errUnsupportedWindowsPath = errors.New("unsupported Windows path")
@@ -41,6 +42,8 @@ type inputSource struct {
 	path    string
 	git     *gitSource
 	docker  *dockerSource
+	nuget   *nugetSource
+	winget  *wingetSource
 	pypi    *pypiSource
 	npm     *npmSource
 	apt     *aptSource
@@ -67,6 +70,19 @@ type dockerSource struct {
 	registry   string
 	repository string
 	reference  string
+}
+
+type nugetSource struct {
+	registry    string
+	name        string
+	version     string
+	tfmSelector string
+}
+
+type wingetSource struct {
+	registry string
+	id       string
+	version  string
 }
 
 type platformSpec struct {
@@ -113,10 +129,12 @@ type apkSource struct {
 }
 
 const (
-	defaultNPMRegistry  = "https://registry.npmjs.org"
-	defaultPyPIRegistry = "https://pypi.org/pypi"
-	defaultAPTRegistry  = "https://archive.ubuntu.com/ubuntu"
-	defaultAPKRegistry  = "https://dl-cdn.alpinelinux.org/alpine"
+	defaultNPMRegistry    = "https://registry.npmjs.org"
+	defaultNuGetRegistry  = "https://api.nuget.org/v3/index.json"
+	defaultWingetRegistry = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests"
+	defaultPyPIRegistry   = "https://pypi.org/pypi"
+	defaultAPTRegistry    = "https://archive.ubuntu.com/ubuntu"
+	defaultAPKRegistry    = "https://dl-cdn.alpinelinux.org/alpine"
 )
 
 func main() {
@@ -126,12 +144,13 @@ func main() {
 	downloadOnly := flag.Bool("download-only", false, "download/copy the original source without extracting it")
 	noTempFile := flag.Bool("no-tempfile", false, "buffer non-Range ZIP in memory instead of a temp file")
 	platform := flag.String("platform", defaultDockerPlatform(), "platform for registry images (for example linux/amd64)")
-	registry := flag.String("registry", "", "override registry/repository base for docker, pypi, npm, apt, rpm, or apk sources")
+	registry := flag.String("registry", "", "override registry/repository base for docker, nuget, winget, pypi, npm, apt, rpm, or apk sources")
+	target := flag.String("target", "", "repository-specific target selector such as bionic, v3.22, 42, or net8.0")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, pypi:// package reference, npm:// package reference, apt:// package reference, rpm:// package reference, apk:// package reference, Git repository URL, or local file path")
+		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, nuget:// package reference, winget:// package reference, pypi:// package reference, npm:// package reference, apt:// package reference, rpm:// package reference, apk:// package reference, Git repository URL, or local file path")
 		fmt.Fprintln(os.Stderr, "  dest  destination folder (default: current directory); created if absent")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "flags:")
@@ -151,7 +170,7 @@ func main() {
 		dest = args[1]
 	}
 
-	src, err := resolveInputSource(sourceArg, *registry)
+	src, err := resolveInputSource(sourceArg, *registry, *target)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot resolve source: %v\n", err)
 		os.Exit(1)
@@ -394,6 +413,12 @@ func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTemp
 	if src.docker != nil {
 		return runDocker(src, dest, skip, symlinks, downloadOnly, platform, pr)
 	}
+	if src.nuget != nil {
+		return runNuGet(src, dest, skip, symlinks, downloadOnly, platform, pr)
+	}
+	if src.winget != nil {
+		return runWinget(src, dest, skip, symlinks, downloadOnly, platform, pr)
+	}
 	if src.pypi != nil {
 		return runPyPI(src, dest, skip, symlinks, downloadOnly, pr)
 	}
@@ -584,6 +609,58 @@ type pypiProjectResponse struct {
 	Releases map[string][]pypiReleaseFile `json:"releases"`
 }
 
+type nugetServiceIndex struct {
+	Resources []nugetServiceResource `json:"resources"`
+}
+
+type nugetServiceResource struct {
+	ID   string `json:"@id"`
+	Type string `json:"@type"`
+}
+
+type nugetVersionsResponse struct {
+	Versions []string `json:"versions"`
+}
+
+type wingetGitHubEntry struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	DownloadURL string `json:"download_url"`
+}
+
+type wingetManifest struct {
+	PackageIdentifier string              `yaml:"PackageIdentifier"`
+	PackageVersion    string              `yaml:"PackageVersion"`
+	ManifestType      string              `yaml:"ManifestType"`
+	Dependencies      *wingetDependencies `yaml:"Dependencies"`
+	Installers        []wingetInstaller   `yaml:"Installers"`
+}
+
+type wingetDependencies struct {
+	PackageDependencies []wingetPackageDependency `yaml:"PackageDependencies"`
+}
+
+type wingetPackageDependency struct {
+	PackageIdentifier string `yaml:"PackageIdentifier"`
+	MinimumVersion    string `yaml:"MinimumVersion"`
+}
+
+type wingetInstaller struct {
+	Architecture        string              `yaml:"Architecture"`
+	Scope               string              `yaml:"Scope"`
+	InstallerURL        string              `yaml:"InstallerUrl"`
+	InstallerType       string              `yaml:"InstallerType"`
+	NestedInstallerType string              `yaml:"NestedInstallerType"`
+	Dependencies        *wingetDependencies `yaml:"Dependencies"`
+}
+
+type wingetResolvedPackage struct {
+	ID           string
+	Version      string
+	Installer    wingetInstaller
+	Dependencies []wingetPackageDependency
+}
+
 type pypiProjectInfo struct {
 	Name         string   `json:"name"`
 	Version      string   `json:"version"`
@@ -674,6 +751,51 @@ func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bo
 
 	for _, layer := range manifest.Layers {
 		if err := applyDockerLayer(ctx, rc, layer, dest, skip, symlinks, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
+}
+
+func runNuGet(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
+	ctx := context.Background()
+	client := newHTTPClient(pr)
+	tfm := resolveNuGetTargetFramework(src.nuget, platformRaw)
+
+	root, releases, err := resolveNuGetDependencies(ctx, client, src.nuget, tfm)
+	if err != nil {
+		return 0, err
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: nuget  %s@%s", root.Name, root.Version))
+
+	for _, rel := range releases {
+		if err := materializeNuGetPackage(ctx, client, rel, dest, skip, symlinks, downloadOnly, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
+}
+
+func runWinget(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
+	ctx := context.Background()
+	client := newHTTPClient(pr)
+	arch, err := wingetArchFromPlatform(platformRaw)
+	if err != nil {
+		return 0, err
+	}
+
+	root, packages, err := resolveWingetDependencies(ctx, client, src.winget, arch)
+	if err != nil {
+		return 0, err
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: winget  %s@%s  %s", root.ID, root.Version, arch))
+
+	for _, pkg := range packages {
+		if err := materializeWingetInstaller(ctx, client, src, pkg, dest, skip, symlinks, downloadOnly, pr); err != nil {
 			return 0, err
 		}
 	}
@@ -1106,6 +1228,608 @@ func parsePyPIRequirement(raw string) (string, bool) {
 		return "", false
 	}
 	return req, true
+}
+
+type nugetResolvedPackage struct {
+	Name    string
+	Version string
+	BaseURL string
+}
+
+func resolveNuGetDependencies(ctx context.Context, client *http.Client, src *nugetSource, tfm string) (nugetResolvedPackage, []nugetResolvedPackage, error) {
+	baseURL, err := resolveNuGetPackageBase(ctx, client, src.registry)
+	if err != nil {
+		return nugetResolvedPackage{}, nil, err
+	}
+
+	cache := map[string]nugetResolvedPackage{}
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var order []string
+
+	var visit func(name, version string) error
+	visit = func(name, version string) error {
+		key := normalizePackageName(name)
+		if visited[key] {
+			return nil
+		}
+		if visiting[key] {
+			return nil
+		}
+		resolvedVersion, err := resolveNuGetVersion(ctx, client, baseURL, name, version)
+		if err != nil {
+			return err
+		}
+		pkg := nugetResolvedPackage{Name: name, Version: resolvedVersion, BaseURL: baseURL}
+		cache[key] = pkg
+		visiting[key] = true
+		deps, err := fetchNuGetDependencies(ctx, client, baseURL, name, resolvedVersion, tfm)
+		if err != nil {
+			return err
+		}
+		for _, dep := range deps {
+			if err := visit(dep.Name, dep.Version); err != nil {
+				return err
+			}
+		}
+		visiting[key] = false
+		visited[key] = true
+		order = append(order, key)
+		return nil
+	}
+
+	if err := visit(src.name, src.version); err != nil {
+		return nugetResolvedPackage{}, nil, err
+	}
+	root := cache[normalizePackageName(src.name)]
+	packages := make([]nugetResolvedPackage, 0, len(order))
+	for _, key := range order {
+		packages = append(packages, cache[key])
+	}
+	return root, packages, nil
+}
+
+func resolveNuGetPackageBase(ctx context.Context, client *http.Client, registry string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registry, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("nuget service index request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("nuget service index request failed: %s", resp.Status)
+	}
+	var index nugetServiceIndex
+	if err := json.NewDecoder(resp.Body).Decode(&index); err != nil {
+		return "", fmt.Errorf("parse nuget service index: %w", err)
+	}
+	for _, res := range index.Resources {
+		if strings.HasPrefix(res.Type, "PackageBaseAddress") {
+			return strings.TrimRight(res.ID, "/"), nil
+		}
+	}
+	return "", fmt.Errorf("nuget service index does not expose PackageBaseAddress")
+}
+
+func resolveNuGetVersion(ctx context.Context, client *http.Client, baseURL, name, version string) (string, error) {
+	if version != "" {
+		return strings.ToLower(version), nil
+	}
+	u := fmt.Sprintf("%s/%s/index.json", strings.TrimRight(baseURL, "/"), normalizeNuGetPackageName(name))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("nuget versions request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("nuget versions request failed: %s", resp.Status)
+	}
+	var versions nugetVersionsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&versions); err != nil {
+		return "", fmt.Errorf("parse nuget versions: %w", err)
+	}
+	if len(versions.Versions) == 0 {
+		return "", fmt.Errorf("nuget package %s has no versions", name)
+	}
+	return strings.ToLower(versions.Versions[len(versions.Versions)-1]), nil
+}
+
+type nugetDependencyRef struct {
+	Name    string
+	Version string
+}
+
+type nugetNuspecDependency struct {
+	ID      string `xml:"id,attr"`
+	Version string `xml:"version,attr"`
+}
+
+type nugetNuspecGroup struct {
+	TargetFramework string                  `xml:"targetFramework,attr"`
+	Dependencies    []nugetNuspecDependency `xml:"dependency"`
+}
+
+func fetchNuGetDependencies(ctx context.Context, client *http.Client, baseURL, name, version, tfm string) ([]nugetDependencyRef, error) {
+	u := fmt.Sprintf("%s/%s/%s/%s.nuspec", strings.TrimRight(baseURL, "/"), normalizeNuGetPackageName(name), strings.ToLower(version), normalizeNuGetPackageName(name))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("nuget nuspec request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("nuget nuspec request failed: %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read nuget nuspec: %w", err)
+	}
+	return parseNuGetDependencies(body, tfm)
+}
+
+func parseNuGetDependencies(body []byte, tfm string) ([]nugetDependencyRef, error) {
+	type metadata struct {
+		Dependencies struct {
+			Dependencies []nugetNuspecDependency `xml:"dependency"`
+			Groups       []nugetNuspecGroup      `xml:"group"`
+		} `xml:"dependencies"`
+	}
+	type pkg struct {
+		Metadata metadata `xml:"metadata"`
+	}
+	var parsed pkg
+	if err := xml.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parse nuget nuspec: %w", err)
+	}
+	seen := map[string]bool{}
+	var out []nugetDependencyRef
+	appendDep := func(dep nugetNuspecDependency) {
+		if dep.ID == "" {
+			return
+		}
+		key := normalizePackageName(dep.ID)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, nugetDependencyRef{
+			Name:    dep.ID,
+			Version: pickNuGetDependencyVersion(dep.Version),
+		})
+	}
+	for _, dep := range parsed.Metadata.Dependencies.Dependencies {
+		appendDep(dep)
+	}
+	selected := pickNuGetDependencyGroup(parsed.Metadata.Dependencies.Groups, tfm)
+	for _, dep := range selected {
+		appendDep(dep)
+	}
+	return out, nil
+}
+
+func pickNuGetDependencyGroup(groups []nugetNuspecGroup, tfm string) []nugetNuspecDependency {
+	if len(groups) == 0 {
+		return nil
+	}
+	target := normalizeNuGetTFM(tfm)
+	bestScore := -1
+	var best []nugetNuspecDependency
+	for _, grp := range groups {
+		score := scoreNuGetTFM(normalizeNuGetTFM(grp.TargetFramework), target)
+		if score > bestScore {
+			bestScore = score
+			best = grp.Dependencies
+		}
+	}
+	return best
+}
+
+func defaultNuGetTargetFramework(platformRaw string) string {
+	p, err := parsePlatform(platformRaw)
+	if err != nil {
+		return "net8.0"
+	}
+	if p.os == "windows" {
+		return "net48"
+	}
+	return "net8.0"
+}
+
+func resolveNuGetTargetFramework(src *nugetSource, platformRaw string) string {
+	p, err := parsePlatform(platformRaw)
+	if err != nil {
+		return resolveNuGetTFMSelector("", defaultNuGetTargetFramework(platformRaw))
+	}
+	fallback := "net8.0"
+	if p.os == "windows" {
+		fallback = "net48"
+	}
+	return resolveNuGetTFMSelector(src.tfmSelector, fallback)
+}
+
+func resolveNuGetTFMSelector(selector, fallback string) string {
+	if isExplicitNuGetTFM(selector) {
+		return normalizeNuGetTFM(selector)
+	}
+	sel := normalizeNuGetTFMSelector(selector)
+	switch sel {
+	case "":
+		return normalizeNuGetTFM(fallback)
+	case "dotnetcore", "dotnet", "netcoreapp":
+		return normalizeNuGetTFM(fallback)
+	case "netstandard", "standard":
+		return "netstandard2.0"
+	case "netframework", "framework":
+		return "net48"
+	default:
+		return normalizeNuGetTFM(fallback)
+	}
+}
+
+func normalizeNuGetTFM(tfm string) string {
+	tfm = strings.ToLower(strings.TrimSpace(tfm))
+	tfm = strings.TrimPrefix(tfm, ".")
+	switch {
+	case strings.HasPrefix(tfm, "netframework"):
+		return "net" + strings.TrimPrefix(tfm, "netframework")
+	case strings.HasPrefix(tfm, "netcoreapp"):
+		return "net" + strings.TrimPrefix(tfm, "netcoreapp")
+	case strings.HasPrefix(tfm, "dotnetcore"):
+		return "net" + strings.TrimPrefix(tfm, "dotnetcore")
+	case strings.HasPrefix(tfm, "framework"):
+		return "net" + strings.TrimPrefix(tfm, "framework")
+	case strings.HasPrefix(tfm, "standard"):
+		return "netstandard" + strings.TrimPrefix(tfm, "standard")
+	}
+	return tfm
+}
+
+func normalizeNuGetTFMSelector(selector string) string {
+	selector = strings.ToLower(strings.TrimSpace(selector))
+	selector = strings.TrimPrefix(selector, "#")
+	return selector
+}
+
+func isExplicitNuGetTFM(value string) bool {
+	value = normalizeNuGetTFMSelector(value)
+	return strings.HasPrefix(value, "net") || strings.HasPrefix(value, ".net") || strings.HasPrefix(value, "dotnetcore") || strings.HasPrefix(value, "netcoreapp")
+}
+
+func scoreNuGetTFM(groupTFM, targetTFM string) int {
+	switch {
+	case groupTFM == targetTFM:
+		return 100
+	case targetTFM == "net8.0" && groupTFM == "net6.0":
+		return 90
+	case strings.HasPrefix(targetTFM, "net") && groupTFM == "netstandard2.0":
+		return 80
+	case strings.HasPrefix(targetTFM, "net") && groupTFM == "netstandard1.3":
+		return 70
+	case strings.HasPrefix(targetTFM, "net") && groupTFM == "netstandard1.0":
+		return 60
+	case strings.HasPrefix(targetTFM, "net4") && strings.HasPrefix(groupTFM, "net4"):
+		return 50
+	case groupTFM == "":
+		return 10
+	default:
+		return 0
+	}
+}
+
+func pickNuGetDependencyVersion(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	raw = strings.Trim(raw, "[]()")
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			return strings.ToLower(part)
+		}
+	}
+	return ""
+}
+
+func materializeNuGetPackage(ctx context.Context, client *http.Client, rel nugetResolvedPackage, dest string, skip int, symlinks, downloadOnly bool, pr *printer) error {
+	nameLower := normalizeNuGetPackageName(rel.Name)
+	u := fmt.Sprintf("%s/%s/%s/%s.%s.nupkg", strings.TrimRight(rel.BaseURL, "/"), nameLower, strings.ToLower(rel.Version), nameLower, strings.ToLower(rel.Version))
+	resp, err := client.Get(u)
+	if err != nil {
+		return fmt.Errorf("nuget package download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("nuget package download failed: %s", resp.Status)
+	}
+	var dlBytes int64
+	tracked := &countReader{
+		r: resp.Body,
+		onRead: func(n int64) {
+			dlBytes += n
+			pr.onDL(dlBytes, resp.ContentLength)
+		},
+	}
+	hint := fmt.Sprintf("%s.%s.nupkg", nameLower, strings.ToLower(rel.Version))
+	br := bufio.NewReaderSize(tracked, 1<<16)
+	format, reader, err := archives.Identify(ctx, hint, br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return fmt.Errorf("identify nuget package: %w", err)
+	}
+	artifactSrc := inputSource{hint: hint}
+	_, err = materializeSource(ctx, artifactSrc, dest, skip, symlinks, downloadOnly, true, pr, format, reader, resp.ContentLength, resp, client, nil)
+	return err
+}
+
+func resolveWingetDependencies(ctx context.Context, client *http.Client, src *wingetSource, arch string) (wingetResolvedPackage, []wingetResolvedPackage, error) {
+	cache := map[string]wingetResolvedPackage{}
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var order []string
+
+	var visit func(id, version string) error
+	visit = func(id, version string) error {
+		key := strings.ToLower(strings.TrimSpace(id))
+		if visited[key] {
+			return nil
+		}
+		if visiting[key] {
+			return nil
+		}
+		resolved, err := fetchWingetPackage(ctx, client, &wingetSource{registry: src.registry, id: id, version: version}, arch)
+		if err != nil {
+			return err
+		}
+		cache[key] = resolved
+		visiting[key] = true
+		for _, dep := range resolved.Dependencies {
+			if dep.PackageIdentifier == "" {
+				continue
+			}
+			if err := visit(dep.PackageIdentifier, dep.MinimumVersion); err != nil {
+				return err
+			}
+		}
+		visiting[key] = false
+		visited[key] = true
+		order = append(order, key)
+		return nil
+	}
+
+	if err := visit(src.id, src.version); err != nil {
+		return wingetResolvedPackage{}, nil, err
+	}
+	root := cache[strings.ToLower(src.id)]
+	packages := make([]wingetResolvedPackage, 0, len(order))
+	for _, key := range order {
+		packages = append(packages, cache[key])
+	}
+	return root, packages, nil
+}
+
+func fetchWingetPackage(ctx context.Context, client *http.Client, src *wingetSource, arch string) (wingetResolvedPackage, error) {
+	packageDir := strings.TrimRight(src.registry, "/") + "/" + wingetIdentifierPath(src.id)
+	version := src.version
+	if version == "" {
+		versions, err := listWingetVersions(ctx, client, packageDir)
+		if err != nil {
+			return wingetResolvedPackage{}, err
+		}
+		if len(versions) == 0 {
+			return wingetResolvedPackage{}, fmt.Errorf("winget package %s has no versions", src.id)
+		}
+		version = versions[0]
+	}
+	files, err := listWingetEntries(ctx, client, packageDir+"/"+version)
+	if err != nil {
+		return wingetResolvedPackage{}, err
+	}
+	manifest, installer, deps, err := resolveWingetManifestFiles(ctx, client, files, arch)
+	if err != nil {
+		return wingetResolvedPackage{}, err
+	}
+	id := manifest.PackageIdentifier
+	if id == "" {
+		id = src.id
+	}
+	ver := manifest.PackageVersion
+	if ver == "" {
+		ver = version
+	}
+	return wingetResolvedPackage{
+		ID:           id,
+		Version:      ver,
+		Installer:    installer,
+		Dependencies: deps,
+	}, nil
+}
+
+func listWingetVersions(ctx context.Context, client *http.Client, packageDir string) ([]string, error) {
+	entries, err := listWingetEntries(ctx, client, packageDir)
+	if err != nil {
+		return nil, err
+	}
+	var versions []string
+	for _, entry := range entries {
+		if entry.Type != "dir" || strings.HasPrefix(entry.Name, ".") || !looksLikeVersionDir(entry.Name) {
+			continue
+		}
+		versions = append(versions, entry.Name)
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		return compareLooseVersion(versions[i], versions[j]) > 0
+	})
+	return versions, nil
+}
+
+func listWingetEntries(ctx context.Context, client *http.Client, apiURL string) ([]wingetGitHubEntry, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "hx")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("winget registry request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("winget registry request failed: %s", resp.Status)
+	}
+	var entries []wingetGitHubEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("parse winget registry response: %w", err)
+	}
+	return entries, nil
+}
+
+func resolveWingetManifestFiles(ctx context.Context, client *http.Client, files []wingetGitHubEntry, arch string) (wingetManifest, wingetInstaller, []wingetPackageDependency, error) {
+	var manifests []wingetManifest
+	for _, file := range files {
+		if file.Type != "file" || !strings.HasSuffix(strings.ToLower(file.Name), ".yaml") || file.DownloadURL == "" {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, file.DownloadURL, nil)
+		if err != nil {
+			return wingetManifest{}, wingetInstaller{}, nil, err
+		}
+		req.Header.Set("User-Agent", "hx")
+		resp, err := client.Do(req)
+		if err != nil {
+			return wingetManifest{}, wingetInstaller{}, nil, fmt.Errorf("winget manifest download: %w", err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return wingetManifest{}, wingetInstaller{}, nil, fmt.Errorf("read winget manifest: %w", readErr)
+		}
+		var manifest wingetManifest
+		if err := yaml.Unmarshal(body, &manifest); err != nil {
+			return wingetManifest{}, wingetInstaller{}, nil, fmt.Errorf("parse winget manifest: %w", err)
+		}
+		manifests = append(manifests, manifest)
+	}
+	if len(manifests) == 0 {
+		return wingetManifest{}, wingetInstaller{}, nil, fmt.Errorf("winget package does not expose YAML manifests")
+	}
+	var base wingetManifest
+	var installerManifest wingetManifest
+	for _, manifest := range manifests {
+		if base.PackageIdentifier == "" {
+			base = manifest
+		}
+		if strings.EqualFold(manifest.ManifestType, "installer") || len(manifest.Installers) > 0 {
+			installerManifest = manifest
+		}
+	}
+	if installerManifest.PackageIdentifier == "" {
+		installerManifest = base
+	}
+	installer, err := pickWingetInstaller(installerManifest.Installers, arch)
+	if err != nil {
+		return wingetManifest{}, wingetInstaller{}, nil, err
+	}
+	deps := append([]wingetPackageDependency{}, collectWingetDeps(base.Dependencies)...)
+	deps = append(deps, collectWingetDeps(installer.Dependencies)...)
+	return base, installer, dedupeWingetDeps(deps), nil
+}
+
+func collectWingetDeps(deps *wingetDependencies) []wingetPackageDependency {
+	if deps == nil {
+		return nil
+	}
+	return append([]wingetPackageDependency{}, deps.PackageDependencies...)
+}
+
+func dedupeWingetDeps(in []wingetPackageDependency) []wingetPackageDependency {
+	seen := map[string]bool{}
+	var out []wingetPackageDependency
+	for _, dep := range in {
+		key := strings.ToLower(dep.PackageIdentifier)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, dep)
+	}
+	return out
+}
+
+func pickWingetInstaller(installers []wingetInstaller, arch string) (wingetInstaller, error) {
+	for _, installer := range installers {
+		if strings.EqualFold(installer.Architecture, arch) && strings.EqualFold(installer.Scope, "machine") && installer.InstallerURL != "" {
+			return installer, nil
+		}
+	}
+	for _, installer := range installers {
+		if strings.EqualFold(installer.Architecture, arch) && installer.InstallerURL != "" {
+			return installer, nil
+		}
+	}
+	for _, installer := range installers {
+		if (strings.EqualFold(installer.Architecture, "neutral") || strings.EqualFold(installer.Architecture, "x86")) && installer.InstallerURL != "" {
+			return installer, nil
+		}
+	}
+	for _, installer := range installers {
+		if installer.InstallerURL != "" {
+			return installer, nil
+		}
+	}
+	return wingetInstaller{}, fmt.Errorf("winget package does not expose a downloadable installer")
+}
+
+func materializeWingetInstaller(ctx context.Context, client *http.Client, src inputSource, pkg wingetResolvedPackage, dest string, skip int, symlinks, downloadOnly bool, pr *printer) error {
+	resp, err := client.Get(pkg.Installer.InstallerURL)
+	if err != nil {
+		return fmt.Errorf("winget installer download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("winget installer download failed: %s", resp.Status)
+	}
+	var dlBytes int64
+	tracked := &countReader{
+		r: resp.Body,
+		onRead: func(n int64) {
+			dlBytes += n
+			pr.onDL(dlBytes, resp.ContentLength)
+		},
+	}
+	hint := filepath.Base(strings.SplitN(pkg.Installer.InstallerURL, "?", 2)[0])
+	if hint == "" || hint == "." || hint == "/" {
+		hint = strings.ReplaceAll(pkg.ID, ".", "-") + "-" + pkg.Version
+	}
+	br := bufio.NewReaderSize(tracked, 1<<16)
+	format, reader, err := archives.Identify(ctx, hint, br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return fmt.Errorf("identify winget installer: %w", err)
+	}
+	artifactSrc := inputSource{display: src.display, id: src.id, hint: hint}
+	_, err = materializeSource(ctx, artifactSrc, dest, skip, symlinks, downloadOnly, true, pr, format, reader, resp.ContentLength, resp, client, nil)
+	return err
+}
+
+func wingetIdentifierPath(id string) string {
+	parts := strings.Split(strings.TrimSpace(id), ".")
+	if len(parts) == 0 || parts[0] == "" {
+		return ""
+	}
+	head := strings.ToLower(parts[0][:1])
+	return head + "/" + strings.Join(parts, "/")
 }
 
 func fetchAPTIndex(ctx context.Context, client *http.Client, src *aptSource, arch string) (*aptRepoIndex, error) {
@@ -2898,6 +3622,28 @@ func formatSizeInfo(size int64) string {
 }
 
 func resolveInputSource(arg, registry string) (inputSource, error) {
+	if ns, ok, err := parseNuGetSource(arg, registry); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      nugetSourceID(ns),
+			hint:    normalizePackageName(ns.name) + ".nupkg",
+			nuget:   ns,
+		}, nil
+	}
+
+	if ws, ok, err := parseWingetSource(arg, registry); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      wingetSourceID(ws),
+			hint:    strings.ReplaceAll(ws.id, ".", "-"),
+			winget:  ws,
+		}, nil
+	}
+
 	if ps, ok, err := parsePyPISource(arg, registry); err != nil {
 		return inputSource{}, err
 	} else if ok {
@@ -3007,6 +3753,66 @@ func resolveInputSource(arg, registry string) (inputSource, error) {
 func isRemoteSource(s string) bool {
 	s = strings.ToLower(s)
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func parseNuGetSource(raw, registryOverride string) (*nugetSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "nuget:\\") {
+		raw = "nuget://" + raw[len("nuget:\\"):]
+		lower = strings.ToLower(raw)
+	}
+	if !strings.HasPrefix(lower, "nuget://") {
+		return nil, false, nil
+	}
+	ref := raw[len("nuget://"):]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty nuget source")
+	}
+	name := ref
+	version := ""
+	if i := strings.LastIndex(ref, "@"); i > 0 {
+		name = ref[:i]
+		version = ref[i+1:]
+	}
+	if name == "" {
+		return nil, false, fmt.Errorf("invalid nuget source")
+	}
+	registry, selector := normalizeNuGetRegistry(registryOverride)
+	return &nugetSource{
+		registry:    registry,
+		name:        name,
+		version:     version,
+		tfmSelector: selector,
+	}, true, nil
+}
+
+func parseWingetSource(raw, registryOverride string) (*wingetSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "winget:\\") {
+		raw = "winget://" + raw[len("winget:\\"):]
+		lower = strings.ToLower(raw)
+	}
+	if !strings.HasPrefix(lower, "winget://") {
+		return nil, false, nil
+	}
+	ref := raw[len("winget://"):]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty winget source")
+	}
+	id := ref
+	version := ""
+	if i := strings.LastIndex(ref, "@"); i > 0 {
+		id = ref[:i]
+		version = ref[i+1:]
+	}
+	if id == "" {
+		return nil, false, fmt.Errorf("invalid winget source")
+	}
+	return &wingetSource{
+		registry: normalizeWingetRegistry(registryOverride),
+		id:       id,
+		version:  version,
+	}, true, nil
 }
 
 func parsePyPISource(raw, registryOverride string) (*pypiSource, bool, error) {
@@ -3444,6 +4250,24 @@ func npmSourceID(ns *npmSource) string {
 	return "npm://" + ns.name + "@" + ns.selector
 }
 
+func nugetSourceID(ns *nugetSource) string {
+	suffix := ""
+	if ns.tfmSelector != "" {
+		suffix = "#" + normalizeNuGetTFMSelector(ns.tfmSelector)
+	}
+	if ns.version == "" {
+		return "nuget://" + normalizeNuGetPackageName(ns.name) + suffix
+	}
+	return "nuget://" + normalizeNuGetPackageName(ns.name) + "@" + strings.ToLower(ns.version) + suffix
+}
+
+func wingetSourceID(ws *wingetSource) string {
+	if ws.version == "" {
+		return "winget://" + strings.ToLower(ws.id)
+	}
+	return "winget://" + strings.ToLower(ws.id) + "@" + ws.version
+}
+
 func pypiSourceID(ps *pypiSource) string {
 	if ps.version == "" {
 		return "pypi://" + normalizePackageName(ps.name)
@@ -3493,7 +4317,7 @@ func aptSourceID(as *aptSource) string {
 }
 
 func platformKey(src inputSource, raw string) string {
-	if src.docker == nil && src.apt == nil && src.rpm == nil && src.apk == nil {
+	if src.docker == nil && src.apt == nil && src.rpm == nil && src.apk == nil && src.winget == nil && src.nuget == nil {
 		return ""
 	}
 	if src.docker != nil {
@@ -3516,6 +4340,16 @@ func platformKey(src inputSource, raw string) string {
 			return raw
 		}
 		return arch
+	}
+	if src.winget != nil {
+		arch, err := wingetArchFromPlatform(raw)
+		if err != nil {
+			return raw
+		}
+		return arch
+	}
+	if src.nuget != nil {
+		return resolveNuGetTargetFramework(src.nuget, raw)
 	}
 	arch, err = apkArchFromPlatform(raw)
 	if err != nil {
@@ -3540,6 +4374,60 @@ func normalizePyPIRegistry(raw string) string {
 	path := strings.TrimRight(u.Path, "/")
 	if path == "" {
 		path = "/pypi"
+	}
+	u.Path = path
+	return strings.TrimRight(u.String(), "/")
+}
+
+func normalizeNuGetRegistry(raw string) (string, string) {
+	if raw == "" {
+		return defaultNuGetRegistry, ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return defaultNuGetRegistry, ""
+	}
+	selector := u.Fragment
+	u.RawQuery = ""
+	u.Fragment = ""
+	path := strings.TrimRight(u.Path, "/")
+	if path == "" {
+		path = "/v3/index.json"
+	} else if !strings.HasSuffix(strings.ToLower(path), ".json") {
+		path += "/index.json"
+	}
+	u.Path = path
+	return u.String(), selector
+}
+
+func normalizeWingetRegistry(raw string) string {
+	if raw == "" {
+		return defaultWingetRegistry
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return defaultWingetRegistry
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	if strings.EqualFold(u.Host, "github.com") {
+		parts := splitURLPath(u.Path)
+		if len(parts) >= 2 {
+			u.Scheme = "https"
+			u.Host = "api.github.com"
+			u.Path = "/repos/" + parts[0] + "/" + parts[1] + "/contents/manifests"
+			return u.String()
+		}
+	}
+	path := strings.TrimRight(u.Path, "/")
+	if path == "" {
+		path = "/repos/microsoft/winget-pkgs/contents/manifests"
 	}
 	u.Path = path
 	return strings.TrimRight(u.String(), "/")
@@ -3678,6 +4566,25 @@ func apkArchFromPlatform(raw string) (string, error) {
 		default:
 			return "armv7", nil
 		}
+	default:
+		return p.arch, nil
+	}
+}
+
+func wingetArchFromPlatform(raw string) (string, error) {
+	p, err := parsePlatform(raw)
+	if err != nil {
+		return "", err
+	}
+	switch p.arch {
+	case "amd64":
+		return "x64", nil
+	case "386":
+		return "x86", nil
+	case "arm64":
+		return "arm64", nil
+	case "arm":
+		return "arm", nil
 	default:
 		return p.arch, nil
 	}
@@ -3904,6 +4811,98 @@ func normalizePackageName(name string) string {
 	name = strings.ReplaceAll(name, "_", "-")
 	name = strings.ReplaceAll(name, ".", "-")
 	return name
+}
+
+func normalizeNuGetPackageName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func looksLikeVersionDir(name string) bool {
+	if name == "" {
+		return false
+	}
+	r := rune(name[0])
+	return r >= '0' && r <= '9'
+}
+
+func compareLooseVersion(a, b string) int {
+	as := splitVersionTokens(a)
+	bs := splitVersionTokens(b)
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		var at, bt string
+		if i < len(as) {
+			at = as[i]
+		}
+		if i < len(bs) {
+			bt = bs[i]
+		}
+		ai, aNum := scanInt(at)
+		bi, bNum := scanInt(bt)
+		switch {
+		case aNum && bNum:
+			if ai != bi {
+				if ai < bi {
+					return -1
+				}
+				return 1
+			}
+		default:
+			if at != bt {
+				if at < bt {
+					return -1
+				}
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+func splitVersionTokens(v string) []string {
+	var tokens []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+	}
+	var prevDigit bool
+	var prevSet bool
+	for _, r := range v {
+		if r == '.' || r == '-' || r == '_' || r == '+' {
+			flush()
+			prevSet = false
+			continue
+		}
+		isDigit := r >= '0' && r <= '9'
+		if prevSet && isDigit != prevDigit {
+			flush()
+		}
+		cur.WriteRune(r)
+		prevDigit = isDigit
+		prevSet = true
+	}
+	flush()
+	return tokens
+}
+
+func scanInt(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	var n int
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, true
 }
 
 func parseAPKList(raw string) []string {

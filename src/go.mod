@@ -6,6 +6,7 @@ require (
 	github.com/go-git/go-git/v5 v5.17.2
 	github.com/mholt/archives v0.1.5
 	github.com/sassoftware/go-rpmutils v0.4.0
+	go.yaml.in/yaml/v4 v4.0.0-rc.4
 )
 
 require (
