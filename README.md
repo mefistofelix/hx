@@ -1,6 +1,6 @@
 # hx
 
-Stream-extract **tar.gz, zip, 7z, rar** and more over HTTP on the fly — optionally strip leading path segments, zero dependencies, statically compiled. Drop it into any CI pipeline or bootstrap script on any platform.
+Stream-extract **tar.gz, zip, 7z, rar** and more from HTTP(S) URLs, Docker registry images, Git repository URLs, or local files. It also handles single-file compression formats like `.gz` and plain non-archive downloads, while staying dependency-light and CI-friendly.
 
 ## Install
 
@@ -10,13 +10,13 @@ Or build from source (see [Building](#building)).
 
 ## Usage
 
-```
-hx [flags] <url> [dest]
+```sh
+hx [flags] <source> [dest]
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `url` | yes | HTTP/HTTPS URL of the archive |
+| `source` | yes | HTTP/HTTPS URL, `docker://` image reference, Git repository URL, or local file path |
 | `dest` | no | Destination folder; defaults to current directory; created if absent |
 
 | Flag | Default | Description |
@@ -24,9 +24,11 @@ hx [flags] <url> [dest]
 | `-skip N` | `0` | Strip N leading path components from every archive entry |
 | `-symlinks` | off | Extract symbolic links (skipped by default for safety) |
 | `-quiet` | off | Plain text output instead of rich ANSI progress |
+| `-download-only` | off | Download/copy the original source file without extracting or decompressing it |
 | `-no-tempfile` | off | Buffer non-Range ZIP in memory instead of a temp file |
+| `-platform OS/ARCH[/VARIANT]` | `linux/<host-arch>` | Platform selector for Docker registry images, for example `linux/amd64` |
 
-Flags must be placed before `url`.
+Flags must be placed before `source`.
 
 ## Examples
 
@@ -34,8 +36,37 @@ Flags must be placed before `url`.
 # Extract into current directory, strip the top-level wrapper folder
 hx -skip 1 https://example.com/repo.tar.gz
 
-# Extract into ./out/
+# Extract a remote ZIP into ./out/
 hx https://example.com/repo.zip ./out
+
+# Extract a local ZIP into ./out/
+hx .\downloads\repo.zip ./out
+
+# Strip the wrapper folder from a local tarball
+hx -skip 1 ./downloads/repo.tar.gz ./out
+
+# Decompress a single gzip file into ./out/file.txt
+hx https://example.com/file.txt.gz ./out
+
+# Download a plain file without extracting it
+hx https://example.com/tool.exe ./out
+
+# Download an archive without extracting it
+hx -download-only https://example.com/repo.tar.gz ./out
+
+# Download the default branch of a Git repo
+hx https://github.com/go-git/go-billy ./out
+
+# Download a specific branch/tag/commit from a Git repo
+hx https://github.com/go-git/go-billy?branch=master ./out
+hx https://github.com/go-git/go-billy#tag=v5.6.2 ./out
+hx https://github.com/go-git/go-billy#commit=9d2901ab42b4 ./out
+
+# Extract a container image root filesystem from a registry
+hx docker://busybox:latest ./out
+
+# Select a specific image platform from a multi-arch image
+hx -platform linux/amd64 docker://registry.k8s.io/pause:3.9 ./out
 
 # Strip prefix and extract symlinks
 hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
@@ -43,7 +74,7 @@ hx -skip 1 -symlinks https://example.com/repo.tar.gz ./out
 # CI / plain text output (no ANSI)
 hx -quiet -skip 1 https://example.com/repo.tar.gz ./out
 
-# Force in-memory ZIP buffer (no temp file on disk)
+# Force in-memory ZIP buffer for a non-Range HTTP server
 hx -no-tempfile https://example.com/repo.zip ./out
 ```
 
@@ -51,15 +82,15 @@ hx -no-tempfile https://example.com/repo.zip ./out
 
 ### Plain mode (CI-friendly)
 
-```
-url:    https://example.com/repo.tar.gz
+```text
+source: https://example.com/repo.tar.gz
 format: tar.gz  32.5 MB
 done  14970 files  138.2 MB  (4.1s)
 ```
 
 ### ANSI progress mode (default)
 
-```
+```text
 Downloading  [▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱]   43%  35.6 / 83.0 MB  4.2 MB/s  ETA 11s
 Extracting  go/src/compress/gzip/gunzip.go  [4.2 kB]  file 1,234  22.3 MB extracted  [▰▰▱▱ 52% @ 3.1 MB/s]
 done  14970 files  138.2 MB  (4.1s)
@@ -67,27 +98,45 @@ done  14970 files  138.2 MB  (4.1s)
 
 ## Idempotency
 
-After a successful extraction `hx` writes a sentinel file in the destination. On subsequent runs with the same URL, destination, `-skip`, and `-symlinks` values it prints `already extracted, skipping` and exits 0 immediately. Changing any of those flags triggers a fresh extraction.
+After a successful extraction/download `hx` writes a sentinel file in the destination. On subsequent runs with the same source, destination, `-skip`, `-symlinks`, `-download-only`, and Docker `-platform` values it prints `already extracted, skipping` and exits 0 immediately.
+
+- Remote sources are keyed by URL.
+- Git sources are keyed by the normalized clone URL plus selected branch/tag/commit.
+- Docker sources are keyed by normalized image reference plus selected platform.
+- Local sources are keyed by absolute file path.
+- Changing the source, destination, `-skip`, `-symlinks`, `-download-only`, or Docker `-platform` triggers a fresh extraction/download.
 
 ## Supported formats
 
-- **tar** — plain, gzip, bzip2, xz, zstd, lz4, brotli, snappy, and more
+- **tar**: plain, gzip, bzip2, xz, zstd, lz4, brotli, snappy, and more
 - **zip**
 - **7-Zip**, **RAR** (read-only), and others via [mholt/archives](https://github.com/mholt/archives)
+- **Git repositories** via [go-git](https://github.com/go-git/go-git)
+- **Docker/OCI registry images** fetched directly from the registry HTTP API
 
-Format is auto-detected from magic bytes.
+Format is auto-detected from magic bytes. If no archive/compression format matches, `hx` falls back to copying the source file into `dest`.
+
+For Git sources, `hx` accepts explicit Git clone URLs such as `https://host/org/repo.git`, plus direct GitHub repository URLs like `https://github.com/org/repo`. GitHub archive/release asset URLs such as `/archive/...zip` still stay on the normal HTTP archive path and are not reinterpreted as Git repositories.
+
+For Docker registry sources, use an explicit `docker://` image reference such as `docker://busybox:latest` or `docker://ghcr.io/org/image:tag`. `hx` talks to the registry API directly and streams layers into `dest` without requiring Docker, Podman, or any other local container runtime.
 
 ## Streaming design
 
 | Format | Strategy |
 |--------|----------|
-| tar-based | True streaming — bytes flow TCP → decompressor → disk. Memory is O(1). |
-| ZIP with `Accept-Ranges` | HTTP 206 Range requests — only the central directory and active file are fetched. Peak memory stays near the Go runtime baseline (~15 MB). |
+| tar-based over HTTP | True streaming: bytes flow TCP -> decompressor -> disk. Memory is O(1). |
+| ZIP with `Accept-Ranges` | HTTP 206 range requests: only the central directory and active file are fetched. Peak memory stays near the Go runtime baseline (~15 MB). |
 | ZIP without `Accept-Ranges` | Downloaded to a temp file on disk, then extracted. A `[warn]` line is printed. Use `-no-tempfile` to buffer in memory instead. |
+| Single-file compression (`.gz`, `.xz`, ...) | The stream is decompressed and written as a single output file inside `dest`, usually with the compression suffix removed. |
+| Plain files | If no registered format matches, the source is copied into `dest` without extraction. |
+| Local files | Read directly from disk. Local ZIP archives are extracted from the source file itself, so no HTTP buffering/temp-file fallback is involved. |
+| `-download-only` | Bypasses extraction/decompression and writes the original source file into `dest`. |
+| Git repositories | Cloned into a temp directory with `go-git`, then only the checked-out worktree contents are copied into `dest` without leaving a usable `.git` directory behind. Default branch, branch, and tag downloads use a shallow clone; exact commit downloads may fall back to a broader fetch so the requested commit can be checked out. |
+| Docker registry images | The image manifest is fetched from the registry API, the requested platform is selected, and each layer is streamed and applied directly into `dest` without temp files or a local container runtime. |
 
 ## Building
 
-Requires no pre-installed Go — the build scripts download and cache the toolchain automatically.
+Requires no pre-installed Go: the build scripts download and cache the toolchain automatically.
 
 ```sh
 # Windows
@@ -99,7 +148,7 @@ chmod +x build.sh && ./build.sh
 
 Output binaries land in `bin/`:
 
-```
+```text
 bin/hx.exe   Windows AMD64, statically linked
 bin/hx       Linux AMD64, statically linked
 ```

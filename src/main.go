@@ -4,30 +4,76 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/mholt/archives"
 )
 
-// ── main ──────────────────────────────────────────────────────────────────────
+type inputSource struct {
+	display string
+	id      string
+	hint    string
+	local   bool
+	path    string
+	git     *gitSource
+	docker  *dockerSource
+}
+
+type gitSource struct {
+	cloneURL string
+	refKind  gitRefKind
+	refValue string
+}
+
+type gitRefKind int
+
+const (
+	gitRefDefault gitRefKind = iota
+	gitRefBranch
+	gitRefTag
+	gitRefCommit
+)
+
+type dockerSource struct {
+	registry   string
+	repository string
+	reference  string
+}
+
+type platformSpec struct {
+	raw        string
+	os         string
+	arch       string
+	variant    string
+	normalized string
+}
 
 func main() {
-	skip       := flag.Int("skip", 0, "strip N leading path components from each archive entry")
-	symlinks   := flag.Bool("symlinks", false, "extract symbolic links (skipped by default for safety)")
-	quiet      := flag.Bool("quiet", false, "plain text output instead of rich ANSI progress")
+	skip := flag.Int("skip", 0, "strip N leading path components from each archive entry")
+	symlinks := flag.Bool("symlinks", false, "extract symbolic links (skipped by default for safety)")
+	quiet := flag.Bool("quiet", false, "plain text output instead of rich ANSI progress")
+	downloadOnly := flag.Bool("download-only", false, "download/copy the original source without extracting it")
 	noTempFile := flag.Bool("no-tempfile", false, "buffer non-Range ZIP in memory instead of a temp file")
+	platform := flag.String("platform", defaultDockerPlatform(), "platform for registry images (for example linux/amd64)")
 
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: hx [flags] <url> [dest]")
+		fmt.Fprintln(os.Stderr, "usage: hx [flags] <source> [dest]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  url   HTTP/HTTPS URL of the archive to download and extract")
+		fmt.Fprintln(os.Stderr, "  source  HTTP/HTTPS URL, docker:// image reference, Git repository URL, or local file path")
 		fmt.Fprintln(os.Stderr, "  dest  destination folder (default: current directory); created if absent")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "flags:")
@@ -41,10 +87,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	rawURL := args[0]
+	sourceArg := args[0]
 	dest := "."
 	if len(args) >= 2 {
 		dest = args[1]
+	}
+
+	src, err := resolveInputSource(sourceArg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot resolve source: %v\n", err)
+		os.Exit(1)
 	}
 
 	absDest, err := filepath.Abs(dest)
@@ -59,7 +111,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	doneFile := filepath.Join(dest, doneFileName(rawURL, *skip, *symlinks))
+	doneFile := filepath.Join(dest, doneFileName(src.id, *skip, *symlinks, *downloadOnly, platformKey(src, *platform)))
 	if _, err := os.Stat(doneFile); err == nil {
 		fmt.Println("already extracted, skipping")
 		return
@@ -71,7 +123,7 @@ func main() {
 	}
 
 	pr := newPrinter(!*quiet)
-	_, err = run(rawURL, dest, *skip, *symlinks, !*noTempFile, pr)
+	_, err = run(src, dest, *skip, *symlinks, *downloadOnly, !*noTempFile, *platform, pr)
 	pr.commit()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "extraction failed: %v\n", err)
@@ -86,19 +138,16 @@ func main() {
 	pr.done()
 }
 
-// ── Printer ───────────────────────────────────────────────────────────────────
-
 type printer struct {
 	ansi       bool
 	start      time.Time
-	inplace    bool      // last write used \r (not newline-terminated)
-	lastRender time.Time // throttle for in-place refreshes
+	inplace    bool
+	lastRender time.Time
 
-	// live state used by render()
 	dlBytes        int64
-	dlTotal        int64 // -1 = unknown
+	dlTotal        int64
 	fileCount      int
-	totalExtracted int64 // sum of uncompressed sizes
+	totalExtracted int64
 	lastFile       string
 	lastSize       int64
 }
@@ -109,7 +158,6 @@ func newPrinter(ansi bool) *printer {
 	return &printer{ansi: ansi, start: time.Now(), dlTotal: -1, lastSize: -1}
 }
 
-// commit ends any pending in-place line with a newline.
 func (p *printer) commit() {
 	if p.inplace {
 		fmt.Println()
@@ -120,7 +168,6 @@ func (p *printer) commit() {
 func (p *printer) info(msg string) {
 	p.commit()
 	if p.ansi {
-		// Dim the "key:" label prefix so the value stands out.
 		if i := strings.IndexByte(msg, ':'); i > 0 && i < 12 {
 			fmt.Printf("\033[2m%s\033[0m%s\n", msg[:i+1], msg[i+1:])
 			return
@@ -152,14 +199,12 @@ func (p *printer) done() {
 	}
 }
 
-// onDL is called as bytes are downloaded; total = -1 when unknown.
 func (p *printer) onDL(downloaded, total int64) {
 	p.dlBytes = downloaded
 	p.dlTotal = total
 	p.render()
 }
 
-// onFile is called for each file actually extracted (not dirs or skipped symlinks).
 func (p *printer) onFile(name string, size int64) {
 	p.fileCount++
 	if size >= 0 {
@@ -167,13 +212,11 @@ func (p *printer) onFile(name string, size int64) {
 	}
 	p.lastFile = name
 	p.lastSize = size
-	// plain mode: no per-file output; summary is printed at the end by main.
 	if p.ansi {
 		p.render()
 	}
 }
 
-// render repaints the single in-place ANSI line (throttled).
 func (p *printer) render() {
 	if !p.ansi {
 		return
@@ -191,7 +234,6 @@ func (p *printer) render() {
 
 	var line string
 	if p.fileCount > 0 {
-		// Extraction phase: current file, running totals, download info
 		sizeStr := ""
 		if p.lastSize >= 0 {
 			sizeStr = "  \033[2m" + fmtBytes(p.lastSize) + "\033[0m"
@@ -209,7 +251,6 @@ func (p *printer) render() {
 		line = fmt.Sprintf("\033[1mExtracting\033[0m  \033[36m%-44s\033[0m%s%s%s",
 			truncate(p.lastFile, 44), sizeStr, progress, dlInfo)
 	} else {
-		// Download-only phase (ZIP temp-file download before extraction begins)
 		if p.dlTotal > 0 {
 			pct := int(100 * p.dlBytes / p.dlTotal)
 			bar := progressBar(pct, 28)
@@ -229,13 +270,24 @@ func (p *printer) render() {
 	p.inplace = true
 }
 
-// ── run ───────────────────────────────────────────────────────────────────────
+func run(src inputSource, dest string, skip int, symlinks, downloadOnly, useTempFile bool, platform string, pr *printer) (int, error) {
+	if src.git != nil {
+		return runGit(src, dest, symlinks, downloadOnly, pr)
+	}
+	if src.docker != nil {
+		return runDocker(src, dest, skip, symlinks, downloadOnly, platform, pr)
+	}
+	if src.local {
+		return runLocal(src, dest, skip, symlinks, downloadOnly, pr)
+	}
+	return runRemote(src, dest, skip, symlinks, downloadOnly, useTempFile, pr)
+}
 
-func run(rawURL, dest string, skip int, symlinks, useTempFile bool, pr *printer) (int, error) {
+func runRemote(src inputSource, dest string, skip int, symlinks, downloadOnly, useTempFile bool, pr *printer) (int, error) {
 	ctx := context.Background()
 	client := &http.Client{}
 
-	resp, err := client.Get(rawURL)
+	resp, err := client.Get(src.display)
 	if err != nil {
 		return 0, fmt.Errorf("http get: %w", err)
 	}
@@ -245,10 +297,8 @@ func run(rawURL, dest string, skip int, symlinks, useTempFile bool, pr *printer)
 		return 0, fmt.Errorf("server returned %s", resp.Status)
 	}
 
-	// Print url: before any body reads so it always appears first in ANSI mode.
-	pr.info(fmt.Sprintf("url:    %s", rawURL))
+	pr.info(fmt.Sprintf("source: %s", src.display))
 
-	// Wrap body in a byte counter so download bytes are tracked as data flows.
 	var dlBytes int64
 	tracked := &countReader{
 		r: resp.Body,
@@ -259,39 +309,394 @@ func run(rawURL, dest string, skip int, symlinks, useTempFile bool, pr *printer)
 	}
 
 	br := bufio.NewReaderSize(tracked, 1<<16)
-	hint := filepath.Base(strings.SplitN(rawURL, "?", 2)[0])
-
-	format, reader, err := archives.Identify(ctx, hint, br)
-	if err != nil {
+	format, reader, err := archives.Identify(ctx, src.hint, br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
 		return 0, fmt.Errorf("identify format: %w", err)
+	}
+
+	return materializeSource(ctx, src, dest, skip, symlinks, downloadOnly, useTempFile, pr, format, reader, resp.ContentLength, resp, client, nil)
+}
+
+func runLocal(src inputSource, dest string, skip int, symlinks, downloadOnly bool, pr *printer) (int, error) {
+	ctx := context.Background()
+
+	f, err := os.Open(src.path)
+	if err != nil {
+		return 0, fmt.Errorf("open local source: %w", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat local source: %w", err)
+	}
+
+	pr.info(fmt.Sprintf("source: %s", src.display))
+
+	br := bufio.NewReaderSize(f, 1<<16)
+	format, reader, err := archives.Identify(ctx, src.hint, br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return 0, fmt.Errorf("identify format: %w", err)
+	}
+
+	return materializeSource(ctx, src, dest, skip, symlinks, downloadOnly, false, pr, format, reader, info.Size(), nil, nil, f)
+}
+
+func runGit(src inputSource, dest string, symlinks, downloadOnly bool, pr *printer) (int, error) {
+	if downloadOnly {
+		return 0, fmt.Errorf("-download-only is not supported for git sources")
+	}
+
+	ctx := context.Background()
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: git%s", gitRefInfo(src.git)))
+
+	tmp, err := os.MkdirTemp("", "hx-git-*")
+	if err != nil {
+		return 0, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	cloneOpts := &git.CloneOptions{
+		URL:          src.git.cloneURL,
+		SingleBranch: src.git.refKind == gitRefBranch || src.git.refKind == gitRefTag,
+		Depth:        1,
+		Tags:         git.NoTags,
+	}
+
+	switch src.git.refKind {
+	case gitRefBranch:
+		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(src.git.refValue)
+	case gitRefTag:
+		cloneOpts.ReferenceName = plumbing.NewTagReferenceName(src.git.refValue)
+		cloneOpts.Tags = git.AllTags
+	case gitRefCommit:
+		cloneOpts.Depth = 0
+		cloneOpts.SingleBranch = false
+		cloneOpts.Tags = git.NoTags
+	}
+
+	repo, err := git.PlainCloneContext(ctx, tmp, false, cloneOpts)
+	if err != nil {
+		return 0, fmt.Errorf("git clone: %w", err)
+	}
+
+	if src.git.refKind == gitRefCommit {
+		wt, err := repo.Worktree()
+		if err != nil {
+			return 0, fmt.Errorf("git worktree: %w", err)
+		}
+		if err := wt.Checkout(&git.CheckoutOptions{
+			Hash:  plumbing.NewHash(src.git.refValue),
+			Force: true,
+		}); err != nil {
+			return 0, fmt.Errorf("git checkout %s: %w", src.git.refValue, err)
+		}
+	}
+
+	return copyGitWorktree(tmp, dest, symlinks, pr)
+}
+
+type dockerRegistryClient struct {
+	client     *http.Client
+	registry   string
+	repository string
+	token      string
+}
+
+type dockerManifest struct {
+	SchemaVersion int                `json:"schemaVersion"`
+	MediaType     string             `json:"mediaType"`
+	Config        dockerDescriptor   `json:"config"`
+	Layers        []dockerDescriptor `json:"layers"`
+	Manifests     []dockerDescriptor `json:"manifests"`
+}
+
+type dockerDescriptor struct {
+	MediaType string          `json:"mediaType"`
+	Digest    string          `json:"digest"`
+	Size      int64           `json:"size"`
+	URLs      []string        `json:"urls"`
+	Platform  *dockerPlatform `json:"platform"`
+}
+
+type dockerPlatform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+	Variant      string `json:"variant,omitempty"`
+}
+
+type dockerTokenResponse struct {
+	Token       string `json:"token"`
+	AccessToken string `json:"access_token"`
+}
+
+func runDocker(src inputSource, dest string, skip int, symlinks, downloadOnly bool, platformRaw string, pr *printer) (int, error) {
+	if downloadOnly {
+		return 0, fmt.Errorf("-download-only is not supported for docker sources")
+	}
+
+	platform, err := parsePlatform(platformRaw)
+	if err != nil {
+		return 0, err
+	}
+
+	ctx := context.Background()
+	pr.info(fmt.Sprintf("source: %s", src.display))
+	pr.info(fmt.Sprintf("format: docker  %s", platform.normalized))
+
+	rc := &dockerRegistryClient{
+		client:     &http.Client{},
+		registry:   src.docker.registry,
+		repository: src.docker.repository,
+	}
+
+	manifest, err := fetchDockerManifest(ctx, rc, src.docker.reference, platform)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, layer := range manifest.Layers {
+		if err := applyDockerLayer(ctx, rc, layer, dest, skip, symlinks, pr); err != nil {
+			return 0, err
+		}
+	}
+	return pr.fileCount, nil
+}
+
+func fetchDockerManifest(ctx context.Context, rc *dockerRegistryClient, reference string, platform platformSpec) (*dockerManifest, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rc.url("/manifests/"+reference), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", "))
+
+	resp, err := rc.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("docker manifest request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("docker manifest request failed: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read docker manifest: %w", err)
+	}
+
+	var manifest dockerManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return nil, fmt.Errorf("parse docker manifest: %w", err)
+	}
+
+	if isDockerManifestList(manifest) {
+		desc, err := pickDockerManifest(manifest.Manifests, platform)
+		if err != nil {
+			return nil, err
+		}
+		return fetchDockerManifest(ctx, rc, desc.Digest, platform)
+	}
+	if len(manifest.Layers) == 0 {
+		return nil, fmt.Errorf("unsupported docker manifest type")
+	}
+	return &manifest, nil
+}
+
+func applyDockerLayer(ctx context.Context, rc *dockerRegistryClient, layer dockerDescriptor, dest string, skip int, symlinks bool, pr *printer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rc.url("/blobs/"+layer.Digest), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := rc.do(req)
+	if err != nil {
+		return fmt.Errorf("docker blob request %s: %w", layer.Digest, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("docker blob request %s failed: %s", layer.Digest, resp.Status)
+	}
+
+	raw, verify, err := newVerifiedReader(resp.Body, layer.Digest)
+	if err != nil {
+		return err
+	}
+
+	br := bufio.NewReaderSize(raw, 1<<16)
+	format, reader, err := archives.Identify(ctx, layerHint(layer), br)
+	if err != nil && !errors.Is(err, archives.NoMatch) {
+		return fmt.Errorf("identify docker layer %s: %w", layer.Digest, err)
+	}
+
+	if format == nil {
+		return fmt.Errorf("unsupported docker layer format for %s", layer.Digest)
 	}
 
 	ex, ok := format.(archives.Extractor)
 	if !ok {
-		return 0, fmt.Errorf("format %T does not support extraction", format)
+		return fmt.Errorf("docker layer %s is not an archive", layer.Digest)
 	}
-
-	// Print format: after detection (commits any in-place download line first).
-	fmtExt := strings.Trim(format.Extension(), ".")
-	sizeStr := ""
-	if resp.ContentLength > 0 {
-		sizeStr = "  " + fmtBytes(resp.ContentLength)
-	}
-	pr.info(fmt.Sprintf("format: %s%s", fmtExt, sizeStr))
 
 	handler := func(ctx context.Context, f archives.FileInfo) error {
-		return handleEntry(f, dest, skip, symlinks, pr)
+		return handleLayerEntry(f, dest, skip, symlinks, pr)
 	}
-
-	if _, isZip := format.(archives.Zip); isZip {
-		err = extractZip(ctx, rawURL, resp, reader, client, useTempFile, pr, handler)
-	} else {
-		err = ex.Extract(ctx, reader, handler)
+	if err := ex.Extract(ctx, reader, handler); err != nil {
+		return fmt.Errorf("extract docker layer %s: %w", layer.Digest, err)
 	}
-	return pr.fileCount, err
+	if err := verify(); err != nil {
+		return err
+	}
+	return nil
 }
 
-// ── countReader ───────────────────────────────────────────────────────────────
+func (rc *dockerRegistryClient) url(path string) string {
+	return "https://" + rc.registry + "/v2/" + rc.repository + path
+}
+
+func (rc *dockerRegistryClient) do(req *http.Request) (*http.Response, error) {
+	if rc.token != "" {
+		req.Header.Set("Authorization", "Bearer "+rc.token)
+	}
+
+	resp, err := rc.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+
+	challenge := resp.Header.Get("WWW-Authenticate")
+	resp.Body.Close()
+	if err := rc.authorize(req.Context(), challenge); err != nil {
+		return nil, err
+	}
+
+	retry := req.Clone(req.Context())
+	retry.Header = req.Header.Clone()
+	retry.Header.Set("Authorization", "Bearer "+rc.token)
+	return rc.client.Do(retry)
+}
+
+func (rc *dockerRegistryClient) authorize(ctx context.Context, challenge string) error {
+	realm, service, scope, err := parseBearerChallenge(challenge)
+	if err != nil {
+		return err
+	}
+	if scope == "" {
+		scope = "repository:" + rc.repository + ":pull"
+	}
+
+	u, err := url.Parse(realm)
+	if err != nil {
+		return fmt.Errorf("parse auth realm: %w", err)
+	}
+	q := u.Query()
+	if service != "" {
+		q.Set("service", service)
+	}
+	q.Set("scope", scope)
+	q.Set("client_id", "hx")
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := rc.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("registry auth: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("registry auth failed: %s", resp.Status)
+	}
+
+	var tok dockerTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+		return fmt.Errorf("decode registry token: %w", err)
+	}
+	rc.token = tok.Token
+	if rc.token == "" {
+		rc.token = tok.AccessToken
+	}
+	if rc.token == "" {
+		return fmt.Errorf("registry auth response did not include a bearer token")
+	}
+	return nil
+}
+
+func materializeSource(
+	ctx context.Context,
+	src inputSource,
+	dest string,
+	skip int,
+	symlinks bool,
+	downloadOnly bool,
+	useTempFile bool,
+	pr *printer,
+	format archives.Format,
+	reader io.Reader,
+	size int64,
+	resp *http.Response,
+	client *http.Client,
+	localFile *os.File,
+) (int, error) {
+	if downloadOnly {
+		pr.info(fmt.Sprintf("format: file%s", formatSizeInfo(size)))
+		name := singleFileName(src.hint, "")
+		pr.onFile(name, size)
+		return 1, writeSingleFile(reader, dest, name)
+	}
+
+	pr.info(fmt.Sprintf("format: %s%s", formatLabel(format), formatSizeInfo(size)))
+
+	if format == nil {
+		name := singleFileName(src.hint, "")
+		pr.onFile(name, size)
+		return 1, writeSingleFile(reader, dest, name)
+	}
+
+	if ex, ok := format.(archives.Extractor); ok {
+		handler := func(ctx context.Context, f archives.FileInfo) error {
+			return handleEntry(f, dest, skip, symlinks, pr)
+		}
+		if _, isZip := format.(archives.Zip); isZip {
+			if resp != nil {
+				return pr.fileCount, extractRemoteZip(ctx, resp, reader, client, useTempFile, pr, handler)
+			}
+			if localFile == nil {
+				return 0, fmt.Errorf("local zip source not available")
+			}
+			if _, err := localFile.Seek(0, io.SeekStart); err != nil {
+				return 0, fmt.Errorf("rewind local zip: %w", err)
+			}
+			return pr.fileCount, extractLocalZip(ctx, localFile, handler)
+		}
+		return pr.fileCount, ex.Extract(ctx, reader, handler)
+	}
+
+	if dec, ok := format.(archives.Decompressor); ok {
+		rc, err := dec.OpenReader(reader)
+		if err != nil {
+			return 0, fmt.Errorf("open decompressor: %w", err)
+		}
+		defer rc.Close()
+
+		name := singleFileName(src.hint, format.Extension())
+		pr.onFile(name, -1)
+		return 1, writeSingleFile(rc, dest, name)
+	}
+
+	name := singleFileName(src.hint, "")
+	pr.onFile(name, size)
+	return 1, writeSingleFile(reader, dest, name)
+}
 
 type countReader struct {
 	r      io.Reader
@@ -306,11 +711,8 @@ func (c *countReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ── extractZip ────────────────────────────────────────────────────────────────
-
-func extractZip(
+func extractRemoteZip(
 	ctx context.Context,
-	rawURL string,
 	resp *http.Response,
 	fallback io.Reader,
 	client *http.Client,
@@ -320,17 +722,13 @@ func extractZip(
 ) error {
 	ex := archives.Zip{}
 
-	// Prefer HTTP Range requests: only the central directory + individual files are
-	// fetched, so peak memory stays well below the archive size.
 	if resp.Header.Get("Accept-Ranges") == "bytes" && resp.ContentLength > 0 {
 		resp.Body.Close()
-		// Use the final URL after redirects to skip the redirect hop on every ReadAt.
 		finalURL := resp.Request.URL.String()
 		rr := &httpRangeReader{ctx: ctx, url: finalURL, size: resp.ContentLength, client: client, pr: pr}
 		return ex.Extract(ctx, rr, handler)
 	}
 
-	// Server does not support HTTP Range - must download the full ZIP first.
 	reason := "no Accept-Ranges: bytes"
 	if resp.ContentLength <= 0 {
 		reason += ", no Content-Length"
@@ -341,7 +739,6 @@ func extractZip(
 		if err != nil {
 			return fmt.Errorf("create temp file: %w", err)
 		}
-		// Close then remove; on Windows an open handle blocks Remove.
 		defer func() { tmp.Close(); os.Remove(tmp.Name()) }()
 
 		pr.warn(fmt.Sprintf(
@@ -351,16 +748,14 @@ func extractZip(
 		if _, err := io.Copy(tmp, fallback); err != nil {
 			return fmt.Errorf("download to temp file: %w", err)
 		}
-		pr.commit() // end the download progress line before extraction begins
+		pr.commit()
 
-		// Rewind so archives.Zip can read from the beginning.
 		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 			return fmt.Errorf("seek temp file: %w", err)
 		}
 		return ex.Extract(ctx, tmp, handler)
 	}
 
-	// -no-tempfile: buffer the whole archive in memory (original behaviour).
 	pr.warn(fmt.Sprintf(
 		"server does not support HTTP Range (%s); buffering archive in memory (-no-tempfile set)",
 		reason))
@@ -371,7 +766,9 @@ func extractZip(
 	return ex.Extract(ctx, bytes.NewReader(data), handler)
 }
 
-// ── handleEntry ───────────────────────────────────────────────────────────────
+func extractLocalZip(ctx context.Context, f *os.File, handler archives.FileHandler) error {
+	return (archives.Zip{}).Extract(ctx, f, handler)
+}
 
 func handleEntry(f archives.FileInfo, dest string, skip int, allowSymlinks bool, pr *printer) error {
 	if f.IsDir() {
@@ -387,8 +784,6 @@ func handleEntry(f archives.FileInfo, dest string, skip int, allowSymlinks bool,
 	pr.onFile(f.NameInArchive, f.Size())
 	return writeRegularFile(f, dest, skip)
 }
-
-// ── write helpers ─────────────────────────────────────────────────────────────
 
 func writeRegularFile(f archives.FileInfo, dest string, skip int) error {
 	path, err := outPath(dest, f.NameInArchive, skip)
@@ -414,6 +809,25 @@ func writeRegularFile(f archives.FileInfo, dest string, skip int) error {
 	return nil
 }
 
+func writeSingleFile(r io.Reader, dest, name string) error {
+	path, err := singleFileOutPath(dest, name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, r); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
 func writeSymlink(f archives.FileInfo, dest string, skip int) error {
 	path, err := outPath(dest, f.NameInArchive, skip)
 	if err != nil || path == "" {
@@ -429,9 +843,76 @@ func writeSymlink(f archives.FileInfo, dest string, skip int) error {
 	return nil
 }
 
-// ── httpRangeReader ───────────────────────────────────────────────────────────
-// Implements io.Reader, io.ReaderAt, and io.Seeker using HTTP Range requests.
-// Each ReadAt call opens its own connection so concurrent access is safe.
+func copyGitWorktree(srcRoot, dest string, allowSymlinks bool, pr *printer) (int, error) {
+	err := filepath.Walk(srcRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(srcRoot, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(os.PathSeparator)) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		target := filepath.Join(dest, rel)
+		cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
+		if !strings.HasPrefix(filepath.Clean(target)+string(os.PathSeparator), cleanDest) {
+			return fmt.Errorf("path traversal blocked: %s", rel)
+		}
+
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+
+		if info.Mode()&os.ModeSymlink != 0 {
+			if !allowSymlinks {
+				return nil
+			}
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			_ = os.Remove(target)
+			pr.onFile(filepath.ToSlash(rel), -1)
+			return os.Symlink(linkTarget, target)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.Create(target)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			return err
+		}
+		pr.onFile(filepath.ToSlash(rel), info.Size())
+		return nil
+	})
+	return pr.fileCount, err
+}
 
 type httpRangeReader struct {
 	ctx     context.Context
@@ -439,7 +920,7 @@ type httpRangeReader struct {
 	size    int64
 	client  *http.Client
 	pr      *printer
-	fetched int64 // total bytes fetched across all ReadAt calls
+	fetched int64
 	pos     int64
 }
 
@@ -515,14 +996,20 @@ func (r *httpRangeReader) ReadAt(p []byte, off int64) (int, error) {
 	return n, err
 }
 
-// ── path helpers ──────────────────────────────────────────────────────────────
-
-func doneFileName(url string, skip int, symlinks bool) string {
+func doneFileName(sourceID string, skip int, symlinks, downloadOnly bool, platform string) string {
 	sl := 0
 	if symlinks {
 		sl = 1
 	}
-	return fmt.Sprintf("hx-%s-skip%d-sym%dargs.done", sanitizeForFilename(url), skip, sl)
+	dl := 0
+	if downloadOnly {
+		dl = 1
+	}
+	pf := ""
+	if platform != "" {
+		pf = "-plat" + sanitizeForFilename(platform)
+	}
+	return fmt.Sprintf("hx-%s-skip%d-sym%d-dl%d%sargs.done", sanitizeForFilename(sourceID), skip, sl, dl, pf)
 }
 
 func sanitizeForFilename(s string) string {
@@ -574,7 +1061,575 @@ func outPath(dest, nameInArchive string, skip int) (string, error) {
 	return full, nil
 }
 
-// ── display helpers ───────────────────────────────────────────────────────────
+func singleFileOutPath(dest, name string) (string, error) {
+	base := filepath.Base(name)
+	if base == "." || base == string(os.PathSeparator) || base == "" {
+		base = "download"
+	}
+	full := filepath.Join(dest, base)
+	cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(full)+string(os.PathSeparator), cleanDest) {
+		return "", fmt.Errorf("path traversal blocked: %s", name)
+	}
+	return full, nil
+}
+
+func singleFileName(hint, compressionExt string) string {
+	name := filepath.Base(hint)
+	if name == "." || name == "" {
+		name = "download"
+	}
+	if compressionExt != "" && strings.HasSuffix(strings.ToLower(name), strings.ToLower(compressionExt)) {
+		name = name[:len(name)-len(compressionExt)]
+	}
+	if name == "" || name == "." {
+		name = "download"
+	}
+	return name
+}
+
+func formatLabel(format archives.Format) string {
+	if format == nil {
+		return "file"
+	}
+	ext := strings.Trim(format.Extension(), ".")
+	if ext == "" {
+		return "file"
+	}
+	return ext
+}
+
+func formatSizeInfo(size int64) string {
+	if size > 0 {
+		return "  " + fmtBytes(size)
+	}
+	return ""
+}
+
+func resolveInputSource(arg string) (inputSource, error) {
+	if ds, ok, err := parseDockerSource(arg); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      dockerSourceID(ds),
+			hint:    filepath.Base(ds.repository),
+			docker:  ds,
+		}, nil
+	}
+
+	if gs, ok, err := parseGitSource(arg); err != nil {
+		return inputSource{}, err
+	} else if ok {
+		return inputSource{
+			display: arg,
+			id:      gitSourceID(gs),
+			hint:    filepath.Base(strings.TrimSuffix(gs.cloneURL, ".git")),
+			git:     gs,
+		}, nil
+	}
+
+	if isRemoteSource(arg) {
+		return inputSource{
+			display: arg,
+			id:      arg,
+			hint:    filepath.Base(strings.SplitN(arg, "?", 2)[0]),
+		}, nil
+	}
+
+	absPath, err := filepath.Abs(arg)
+	if err != nil {
+		return inputSource{}, err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return inputSource{}, err
+	}
+	if info.IsDir() {
+		return inputSource{}, fmt.Errorf("%s is a directory, expected an archive file", arg)
+	}
+
+	return inputSource{
+		display: absPath,
+		id:      absPath,
+		hint:    filepath.Base(absPath),
+		local:   true,
+		path:    absPath,
+	}, nil
+}
+
+func isRemoteSource(s string) bool {
+	s = strings.ToLower(s)
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func parseDockerSource(raw string) (*dockerSource, bool, error) {
+	lower := strings.ToLower(raw)
+	if !strings.HasPrefix(lower, "docker://") && !strings.HasPrefix(lower, "oci://") {
+		return nil, false, nil
+	}
+
+	ref := raw[strings.Index(raw, "://")+3:]
+	if ref == "" {
+		return nil, false, fmt.Errorf("empty docker source")
+	}
+
+	var digest string
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		digest = ref[i+1:]
+		ref = ref[:i]
+	}
+
+	tag := ""
+	lastSlash := strings.LastIndex(ref, "/")
+	if i := strings.LastIndex(ref, ":"); i > lastSlash {
+		tag = ref[i+1:]
+		ref = ref[:i]
+	}
+
+	parts := strings.Split(ref, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return nil, false, fmt.Errorf("invalid docker source")
+	}
+
+	registry := ""
+	repoParts := parts
+	if len(parts) > 1 && looksLikeRegistryHost(parts[0]) {
+		registry = parts[0]
+		repoParts = parts[1:]
+	}
+	if registry == "" {
+		registry = "registry-1.docker.io"
+		if len(repoParts) == 1 {
+			repoParts = []string{"library", repoParts[0]}
+		}
+	}
+	repository := strings.Join(repoParts, "/")
+	if repository == "" {
+		return nil, false, fmt.Errorf("invalid docker repository")
+	}
+
+	reference := digest
+	if reference == "" {
+		reference = tag
+	}
+	if reference == "" {
+		reference = "latest"
+	}
+
+	return &dockerSource{
+		registry:   registry,
+		repository: repository,
+		reference:  reference,
+	}, true, nil
+}
+
+func parseGitSource(raw string) (*gitSource, bool, error) {
+	if strings.HasPrefix(strings.ToLower(raw), "git+http://") || strings.HasPrefix(strings.ToLower(raw), "git+https://") {
+		raw = raw[4:]
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, false, nil
+	}
+
+	if gs := parseGenericGitURL(u); gs != nil {
+		return gs, true, nil
+	}
+	if gs := parseForgeGitURL(u); gs != nil {
+		return gs, true, nil
+	}
+	return nil, false, nil
+}
+
+func parseGenericGitURL(u *url.URL) *gitSource {
+	path := strings.TrimSuffix(u.Path, "/")
+	if !strings.HasSuffix(strings.ToLower(path), ".git") {
+		return nil
+	}
+	cloneURL := *u
+	cloneURL.RawQuery = ""
+	cloneURL.Fragment = ""
+
+	gs := &gitSource{
+		cloneURL: cloneURL.String(),
+		refKind:  gitRefDefault,
+	}
+	applyGitRefSelectors(gs, u)
+	return gs
+}
+
+func parseForgeGitURL(u *url.URL) *gitSource {
+	host := strings.ToLower(u.Host)
+	if host != "github.com" {
+		return nil
+	}
+
+	parts := splitURLPath(u.Path)
+	if len(parts) < 2 {
+		return nil
+	}
+
+	repoPath := parts[:2]
+	rest := parts[2:]
+	repoName := repoPath[1]
+	if strings.HasSuffix(repoName, ".git") {
+		repoPath[1] = strings.TrimSuffix(repoName, ".git")
+		repoName = repoPath[1]
+	}
+
+	cloneBase := *u
+	cloneBase.Path = "/" + strings.Join(repoPath, "/") + ".git"
+	cloneBase.RawQuery = ""
+	cloneBase.Fragment = ""
+
+	gs := &gitSource{
+		cloneURL: cloneBase.String(),
+		refKind:  gitRefDefault,
+	}
+	matched := len(rest) == 0
+
+	if len(rest) == 2 && rest[0] == "tree" {
+		gs.refKind = gitRefBranch
+		gs.refValue = rest[1]
+		matched = true
+	}
+	if len(rest) == 2 && rest[0] == "commit" {
+		gs.refKind = gitRefCommit
+		gs.refValue = rest[1]
+		matched = true
+	}
+	if len(rest) >= 3 && rest[0] == "releases" && rest[1] == "tag" {
+		gs.refKind = gitRefTag
+		gs.refValue = strings.Join(rest[2:], "/")
+		matched = true
+	}
+
+	applyGitRefSelectors(gs, u)
+	if matched || gs.refValue != "" {
+		return gs
+	}
+	return nil
+}
+
+func applyGitRefSelectors(gs *gitSource, u *url.URL) {
+	if value := u.Query().Get("branch"); value != "" {
+		gs.refKind, gs.refValue = gitRefBranch, value
+		return
+	}
+	if value := u.Query().Get("tag"); value != "" {
+		gs.refKind, gs.refValue = gitRefTag, value
+		return
+	}
+	if value := u.Query().Get("commit"); value != "" {
+		gs.refKind, gs.refValue = gitRefCommit, value
+		return
+	}
+	if value := u.Query().Get("ref"); value != "" {
+		gs.refKind, gs.refValue = classifyGitRef(value)
+		return
+	}
+
+	frag := u.Fragment
+	if frag == "" {
+		return
+	}
+	switch {
+	case strings.HasPrefix(frag, "branch="):
+		gs.refKind, gs.refValue = gitRefBranch, strings.TrimPrefix(frag, "branch=")
+	case strings.HasPrefix(frag, "tag="):
+		gs.refKind, gs.refValue = gitRefTag, strings.TrimPrefix(frag, "tag=")
+	case strings.HasPrefix(frag, "commit="):
+		gs.refKind, gs.refValue = gitRefCommit, strings.TrimPrefix(frag, "commit=")
+	case strings.HasPrefix(frag, "ref="):
+		gs.refKind, gs.refValue = classifyGitRef(strings.TrimPrefix(frag, "ref="))
+	default:
+		gs.refKind, gs.refValue = classifyGitRef(frag)
+	}
+}
+
+func classifyGitRef(value string) (gitRefKind, string) {
+	switch {
+	case isLikelyCommitHash(value):
+		return gitRefCommit, value
+	case strings.HasPrefix(value, "refs/tags/"):
+		return gitRefTag, strings.TrimPrefix(value, "refs/tags/")
+	case strings.HasPrefix(value, "refs/heads/"):
+		return gitRefBranch, strings.TrimPrefix(value, "refs/heads/")
+	default:
+		return gitRefBranch, value
+	}
+}
+
+func gitSourceID(gs *gitSource) string {
+	switch gs.refKind {
+	case gitRefBranch:
+		return gs.cloneURL + "#branch=" + gs.refValue
+	case gitRefTag:
+		return gs.cloneURL + "#tag=" + gs.refValue
+	case gitRefCommit:
+		return gs.cloneURL + "#commit=" + gs.refValue
+	default:
+		return gs.cloneURL
+	}
+}
+
+func gitRefInfo(gs *gitSource) string {
+	switch gs.refKind {
+	case gitRefBranch:
+		return "  branch " + gs.refValue
+	case gitRefTag:
+		return "  tag " + gs.refValue
+	case gitRefCommit:
+		return "  commit " + shortHash(gs.refValue)
+	default:
+		return ""
+	}
+}
+
+func splitURLPath(p string) []string {
+	raw := strings.Split(strings.Trim(p, "/"), "/")
+	out := raw[:0]
+	for _, part := range raw {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func isLikelyCommitHash(s string) bool {
+	if len(s) < 7 || len(s) > 40 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func shortHash(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+func dockerSourceID(ds *dockerSource) string {
+	return "docker://" + ds.registry + "/" + ds.repository + "@" + ds.reference
+}
+
+func platformKey(src inputSource, raw string) string {
+	if src.docker == nil {
+		return ""
+	}
+	p, err := parsePlatform(raw)
+	if err != nil {
+		return raw
+	}
+	return p.normalized
+}
+
+func defaultDockerPlatform() string {
+	arch := runtime.GOARCH
+	if arch == "" {
+		arch = "amd64"
+	}
+	return "linux/" + arch
+}
+
+func parsePlatform(raw string) (platformSpec, error) {
+	parts := strings.Split(raw, "/")
+	if len(parts) < 2 || len(parts) > 3 {
+		return platformSpec{}, fmt.Errorf("invalid platform %q, expected os/arch or os/arch/variant", raw)
+	}
+	p := platformSpec{
+		raw:     raw,
+		os:      parts[0],
+		arch:    parts[1],
+		variant: "",
+	}
+	if p.os == "" || p.arch == "" {
+		return platformSpec{}, fmt.Errorf("invalid platform %q, expected os/arch or os/arch/variant", raw)
+	}
+	if len(parts) == 3 {
+		p.variant = parts[2]
+	}
+	p.normalized = p.os + "/" + p.arch
+	if p.variant != "" {
+		p.normalized += "/" + p.variant
+	}
+	return p, nil
+}
+
+func looksLikeRegistryHost(s string) bool {
+	return s == "localhost" || strings.Contains(s, ".") || strings.Contains(s, ":")
+}
+
+func isDockerManifestList(m dockerManifest) bool {
+	if len(m.Manifests) > 0 {
+		return true
+	}
+	switch m.MediaType {
+	case "application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json":
+		return true
+	default:
+		return false
+	}
+}
+
+func pickDockerManifest(descs []dockerDescriptor, platform platformSpec) (dockerDescriptor, error) {
+	for _, desc := range descs {
+		if desc.Platform == nil {
+			continue
+		}
+		if desc.Platform.OS != platform.os || desc.Platform.Architecture != platform.arch {
+			continue
+		}
+		if platform.variant != "" && desc.Platform.Variant != platform.variant {
+			continue
+		}
+		return desc, nil
+	}
+	return dockerDescriptor{}, fmt.Errorf("no manifest found for platform %s", platform.normalized)
+}
+
+func parseBearerChallenge(header string) (realm, service, scope string, err error) {
+	if header == "" {
+		return "", "", "", fmt.Errorf("registry requires auth but did not provide WWW-Authenticate")
+	}
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return "", "", "", fmt.Errorf("unsupported registry auth challenge: %s", header)
+	}
+	fields := strings.Split(header[len(prefix):], ",")
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		value = strings.Trim(value, `"`)
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "realm":
+			realm = value
+		case "service":
+			service = value
+		case "scope":
+			scope = value
+		}
+	}
+	if realm == "" {
+		return "", "", "", fmt.Errorf("registry auth challenge missing realm")
+	}
+	return realm, service, scope, nil
+}
+
+func layerHint(layer dockerDescriptor) string {
+	switch {
+	case strings.Contains(layer.MediaType, "gzip"):
+		return "layer.tar.gz"
+	case strings.Contains(layer.MediaType, "zstd"):
+		return "layer.tar.zst"
+	default:
+		return "layer.tar"
+	}
+}
+
+func handleLayerEntry(f archives.FileInfo, dest string, skip int, allowSymlinks bool, pr *printer) error {
+	parts := entryParts(f.NameInArchive, skip)
+	if len(parts) == 0 {
+		return nil
+	}
+
+	base := parts[len(parts)-1]
+	parent := parts[:len(parts)-1]
+
+	switch {
+	case base == ".wh..wh..opq":
+		dir, err := outPathFromParts(dest, parent)
+		if err != nil || dir == "" {
+			return err
+		}
+		if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return os.MkdirAll(dir, 0o755)
+	case strings.HasPrefix(base, ".wh."):
+		target, err := outPathFromParts(dest, append(parent, strings.TrimPrefix(base, ".wh.")))
+		if err != nil || target == "" {
+			return err
+		}
+		if err := os.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+
+	if f.IsDir() {
+		path, err := outPathFromParts(dest, parts)
+		if err != nil || path == "" {
+			return err
+		}
+		return os.MkdirAll(path, 0o755)
+	}
+	if f.LinkTarget != "" {
+		if !allowSymlinks {
+			return nil
+		}
+		pr.onFile(filepath.ToSlash(filepath.Join(parts...)), -1)
+		return writeSymlink(f, dest, skip)
+	}
+	pr.onFile(filepath.ToSlash(filepath.Join(parts...)), f.Size())
+	return writeRegularFile(f, dest, skip)
+}
+
+func outPathFromParts(dest string, parts []string) (string, error) {
+	if len(parts) == 0 {
+		return "", nil
+	}
+	full := filepath.Join(append([]string{dest}, parts...)...)
+	cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(full)+string(os.PathSeparator), cleanDest) {
+		return "", fmt.Errorf("path traversal blocked")
+	}
+	return full, nil
+}
+
+func newVerifiedReader(r io.ReadCloser, digest string) (io.ReadCloser, func() error, error) {
+	algo, want, ok := strings.Cut(digest, ":")
+	if !ok {
+		return nil, nil, fmt.Errorf("invalid digest %q", digest)
+	}
+	if algo != "sha256" {
+		return nil, nil, fmt.Errorf("unsupported digest algorithm %q", algo)
+	}
+
+	h := sha256.New()
+	vr := &verifyingReadCloser{r: r, tee: io.TeeReader(r, h)}
+	verify := func() error {
+		got := fmt.Sprintf("%x", h.Sum(nil))
+		if !strings.EqualFold(got, want) {
+			return fmt.Errorf("docker blob digest mismatch for %s", digest)
+		}
+		return nil
+	}
+	return vr, verify, nil
+}
+
+type verifyingReadCloser struct {
+	r   io.ReadCloser
+	tee io.Reader
+}
+
+func (v *verifyingReadCloser) Read(p []byte) (int, error) { return v.tee.Read(p) }
+func (v *verifyingReadCloser) Close() error               { return v.r.Close() }
 
 func progressBar(pct, width int) string {
 	if pct < 0 {
