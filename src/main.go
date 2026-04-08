@@ -29,11 +29,9 @@ import (
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/klauspost/compress/zstd"
 	"github.com/mholt/archives"
 	rpmutils "github.com/sassoftware/go-rpmutils"
-	"github.com/ulikunitz/xz"
-	"gopkg.in/yaml.v3"
+	yaml "github.com/yaml/go-yaml"
 )
 
 // -----------------------------------------------------------------------------
@@ -1922,13 +1920,14 @@ func deb_items(src_url string, src_stream io.Reader, yield func(hx_item, error) 
 				defer gz_reader.Close()
 				return tar_items(tar.NewReader(gz_reader), src_url, yield)
 			case strings.HasSuffix(member_name, ".xz"):
-				xz_reader, err := xz.NewReader(member_reader)
+				xz_reader, err := (archives.Xz{}).OpenReader(member_reader)
 				if err != nil {
 					return err
 				}
+				defer xz_reader.Close()
 				return tar_items(tar.NewReader(xz_reader), src_url, yield)
 			case strings.HasSuffix(member_name, ".zst"):
-				zstd_reader, err := zstd.NewReader(member_reader)
+				zstd_reader, err := (archives.Zstd{}).OpenReader(member_reader)
 				if err != nil {
 					return err
 				}
@@ -2284,7 +2283,14 @@ func apply_docker_layer(root_dir string, registry_base_url string, image_name st
 	defer body.Close()
 
 	layer_reader := io.Reader(body)
-	if strings.Contains(layer.MediaType, "gzip") || strings.Contains(layer.MediaType, "zstd") || strings.Contains(layer.MediaType, "tar+gzip") {
+	if strings.Contains(layer.MediaType, "zstd") {
+		zstd_reader, err := (archives.Zstd{}).OpenReader(body)
+		if err != nil {
+			return err
+		}
+		defer zstd_reader.Close()
+		layer_reader = zstd_reader
+	} else if strings.Contains(layer.MediaType, "gzip") || strings.Contains(layer.MediaType, "tar+gzip") {
 		gz_reader, err := gzip.NewReader(body)
 		if err != nil {
 			return err
