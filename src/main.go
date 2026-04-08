@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"iter"
 	"net/http"
 	"net/url"
@@ -587,10 +588,14 @@ func local_fs_item(current_path string, rel_path string, src_url string) (hx_ite
 	if err != nil {
 		return hx_item{}, err
 	}
+	normalized_path := normalize_rel_path(rel_path)
+	if normalized_path == "" {
+		return hx_item{}, fmt.Errorf("invalid relative path: %s", rel_path)
+	}
 	item := hx_item{
 		type_name:     "file",
 		src_url:       src_url,
-		src_full_path: normalize_rel_path(rel_path),
+		src_full_path: normalized_path,
 		size:          info.Size(),
 	}
 	if info.IsDir() {
@@ -755,10 +760,14 @@ func tar_items(tr *tar.Reader, src_url string, yield func(hx_item, error) bool) 
 		if err != nil {
 			return err
 		}
+		normalized_path := normalize_rel_path(header.Name)
+		if normalized_path == "" {
+			return fmt.Errorf("invalid archive path: %s", header.Name)
+		}
 		item := hx_item{
 			type_name:       "file",
 			src_url:         src_url,
-			src_full_path:   normalize_rel_path(header.Name),
+			src_full_path:   normalized_path,
 			src_link_path:   header.Linkname,
 			size_compressed: header.Size,
 			size_extracted:  header.Size,
@@ -789,10 +798,14 @@ func zip_items(zip_path string, src_url string, yield func(hx_item, error) bool)
 	}
 	defer reader.Close()
 	for _, file := range reader.File {
+		normalized_path := normalize_rel_path(file.Name)
+		if normalized_path == "" {
+			return fmt.Errorf("invalid archive path: %s", file.Name)
+		}
 		item := hx_item{
 			type_name:       "file",
 			src_url:         src_url,
-			src_full_path:   normalize_rel_path(file.Name),
+			src_full_path:   normalized_path,
 			size_compressed: int64(file.CompressedSize64),
 			size_extracted:  int64(file.UncompressedSize64),
 			size:            int64(file.UncompressedSize64),
@@ -890,7 +903,12 @@ func parse_src_url(raw_value string) (*url.URL, string) {
 }
 
 func normalize_rel_path(raw_path string) string {
-	return strings.TrimPrefix(filepath.ToSlash(filepath.Clean(raw_path)), "./")
+	clean_path := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(raw_path)), "./")
+	clean_path = strings.TrimPrefix(clean_path, "/")
+	if clean_path == "" || clean_path == "." || !fs.ValidPath(clean_path) {
+		return ""
+	}
+	return clean_path
 }
 
 func looks_like_http_git_url(src_url *url.URL) bool {
