@@ -56,3 +56,7 @@
   doublestar glob: https://github.com/bmatcuk/doublestar
 
 - ask for any additional third party library dependency
+
+- for python runtime and package management always use uv https://github.com/astral-sh/uv
+
+- for javascript/typescript always use bun or deno as fallback if problems arises
