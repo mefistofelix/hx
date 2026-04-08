@@ -46,6 +46,8 @@
 
 - keep an updated test suite the tests subdirectory in project root
 
+- when the feature is about interoperability with external services or registries, tests are expected to hit real public endpoints and real published artifacts, not simulated local equivalents
+
 - build and tests subsystems will save cache/ephemeral data respectively to build_cache and tests_cache
 
 - never and ever add features or any line of code or enviroement variable or cli argument in the code for the purpose to simplify or mock the test suite, do that only if asked explicitly in CODE_DESIGN.md
