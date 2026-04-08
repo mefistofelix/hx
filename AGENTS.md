@@ -54,4 +54,4 @@
 
 - never ever change delete or modify agents.md claude.md code_style.md or code_design.md desiderata.md
 
-- create and keep updated also the workflow/ci pipeline to create release artifacts for linux and windows x64, reusing the build system we already have and avoiding importing thirdparty actions (for example use gh commands to checkout and not external thirdparty checkoutactions)
+- create and keep updated also the workflow/ci pipeline to create release artifacts for linux and windows x64, reusing the build system we already have and avoiding importing thirdparty actions (for example use gh commands to checkout and not external thirdparty checkoutactions), also permit the workflow to be manually triggered

@@ -1,0 +1,87 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: hx-linux-amd64
+            archive_name: hx-linux-amd64.tar.gz
+            binary_path: bin/hx
+            build_command: bash ./build.sh
+            test_command: bash ./test.sh
+            package_command: tar -czf "$ARCHIVE_NAME" -C bin hx
+          - os: windows-latest
+            artifact_name: hx-windows-amd64
+            archive_name: hx-windows-amd64.zip
+            binary_path: bin/hx.exe
+            build_command: cmd /c build.bat
+            test_command: cmd /c test.bat
+            package_command: powershell -NoLogo -NoProfile -Command "Compress-Archive -Path bin\\hx.exe -DestinationPath $env:ARCHIVE_NAME -Force"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Clone repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh repo clone "$GITHUB_REPOSITORY" repo -- --depth=1
+          cd repo
+          if [ -n "${GITHUB_REF_NAME:-}" ]; then
+            git fetch --depth=1 origin "$GITHUB_REF_NAME" || true
+            git checkout "$GITHUB_REF_NAME" || true
+          fi
+
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd repo
+          ${{ matrix.test_command }}
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd repo
+          ${{ matrix.build_command }}
+
+      - name: Package artifact
+        shell: bash
+        env:
+          ARCHIVE_NAME: ${{ matrix.archive_name }}
+        run: |
+          set -euo pipefail
+          cd repo
+          ${{ matrix.package_command }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: repo/${{ matrix.archive_name }}
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd repo
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes ""
+          gh release upload "$GITHUB_REF_NAME" "${{ matrix.archive_name }}" --clobber
