@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -29,6 +30,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/klauspost/compress/zstd"
+	"github.com/mholt/archives"
 	rpmutils "github.com/sassoftware/go-rpmutils"
 	"github.com/ulikunitz/xz"
 	"gopkg.in/yaml.v3"
@@ -83,6 +85,7 @@ var (
 	deb_suffix           = ".deb"
 	rpm_suffix           = ".rpm"
 	zip_suffixes         = []string{".zip", ".nupkg"}
+	archives_suffixes    = []string{".7z", ".rar", ".br", ".bz2", ".lz", ".lz4", ".mz", ".s2", ".sz", ".xz", ".zz", ".zst"}
 	git_suffix           = ".git"
 	github_host          = "github.com"
 	default_download     = "download"
@@ -1689,6 +1692,9 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 	case strings.HasSuffix(lower_name, rpm_suffix):
 		defer src_stream.Close()
 		return rpm_items(src_url, src_stream, yield)
+	case has_suffix_fold(lower_name, archives_suffixes...):
+		defer src_stream.Close()
+		return archives_items(name, src_url, src_size, src_stream, yield)
 	default:
 		yield(hx_item{
 			src_stream:      src_stream,
@@ -1700,6 +1706,71 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 		}, nil)
 		return nil
 	}
+}
+
+func archives_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item, error) bool) error {
+	format, rewinded_stream, err := archives.Identify(context.Background(), filepath.Base(name), src_stream)
+	if err != nil {
+		return err
+	}
+
+	if extractor, ok := format.(archives.Extractor); ok {
+		return extractor.Extract(context.Background(), rewinded_stream, func(ctx context.Context, info archives.FileInfo) error {
+			normalized_path := normalize_rel_path(info.NameInArchive)
+			if normalized_path == "" {
+				if cleaned_name := strings.Trim(path.Clean(strings.ReplaceAll(info.NameInArchive, "\\", "/")), "/"); cleaned_name == "" || cleaned_name == "." {
+					return nil
+				}
+				return fmt.Errorf("invalid archive path: %s", info.NameInArchive)
+			}
+
+			item := hx_item{
+				type_name:      "file",
+				src_url:        src_url,
+				src_full_path:  normalized_path,
+				src_link_path:  info.LinkTarget,
+				size_extracted: info.Size(),
+				size:           info.Size(),
+			}
+			if info.IsDir() {
+				item.type_name = "dir"
+				item.size = 0
+			} else if info.Mode()&os.ModeSymlink != 0 {
+				item.type_name = "link"
+				item.size = 0
+			} else {
+				file_reader, err := info.Open()
+				if err != nil {
+					return err
+				}
+				item.src_stream = file_reader
+			}
+			if !yield(item, nil) {
+				if item.src_stream != nil {
+					_ = item.src_stream.Close()
+				}
+				return io.EOF
+			}
+			return nil
+		})
+	}
+
+	if decompressor, ok := format.(archives.Decompressor); ok {
+		decompressed_stream, err := decompressor.OpenReader(rewinded_stream)
+		if err != nil {
+			return err
+		}
+		yield(hx_item{
+			src_stream:      decompressed_stream,
+			type_name:       "file",
+			src_url:         src_url,
+			src_full_path:   strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)),
+			size_compressed: src_size,
+		}, nil)
+		return nil
+	}
+
+	return archives.NoMatch
 }
 
 func rpm_items(src_url string, src_stream io.Reader, yield func(hx_item, error) bool) error {

@@ -2,7 +2,7 @@
 
 `hx` is a CLI tool that copies, downloads, or extracts a source into a local folder.
 
-This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `docker://` image sources, `pypi://` package sources, `nuget://` package sources, `winget://` package sources, `npm://` package sources, `apt://` package sources, `rpm://` package sources, and `apk://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.deb`, `.rpm`, `.apk`, and single-file `.gz`.
+This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `docker://` image sources, `pypi://` package sources, `nuget://` package sources, `winget://` package sources, `npm://` package sources, `apt://` package sources, `rpm://` package sources, and `apk://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.7z`, `.rar`, `.deb`, `.rpm`, `.apk`, and decompression for `.br`, `.bz2`, `.gz`, `.lz`, `.lz4`, `.mz`, `.s2`, `.sz`, `.xz`, `.zz`, and `.zst`.
 
 ## Usage
 
@@ -44,6 +44,7 @@ hx [flags] <source> [dest]
 
 - local directories are copied recursively
 - archives are extracted into `dest`
+- additional archive/compression formats such as `.7z`, `.rar`, `.xz`, `.bz2`, `.zst`, `.lz4`, `.br`, and related single-file compressed variants are handled through `mholt/archives`
 - plain files are copied into `dest`
 - Git sources are cloned to a temporary worktree and copied without the `.git` directory
 - `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`

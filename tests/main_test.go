@@ -1,12 +1,15 @@
 package tests
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/mholt/archives"
 )
 
 func TestHTTPArchiveAndSentinel(t *testing.T) {
@@ -24,6 +27,59 @@ func TestHTTPArchiveAndSentinel(t *testing.T) {
 	output := run_hx(t, "-strip", "1", "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz", dst_dir)
 	if !strings.Contains(output, "already matches") {
 		t.Fatalf("expected sentinel skip warning, got %q", output)
+	}
+}
+
+func TestTarXzExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	input_dir := filepath.Join(root_dir, "input")
+	dst_dir := filepath.Join(root_dir, "out")
+	archive_path := filepath.Join(root_dir, "sample.tar.xz")
+
+	must(t, os.MkdirAll(filepath.Join(input_dir, "nested"), 0o755))
+	must(t, os.WriteFile(filepath.Join(input_dir, "nested", "hello.txt"), []byte("hello tar.xz"), 0o644))
+
+	files, err := archives.FilesFromDisk(context.Background(), nil, map[string]string{
+		filepath.Join(input_dir, "nested"): "nested",
+	})
+	must(t, err)
+	out_file, err := os.Create(archive_path)
+	must(t, err)
+	must(t, archives.CompressedArchive{
+		Compression: archives.Xz{},
+		Archival:    archives.Tar{},
+	}.Archive(context.Background(), out_file, files))
+	must(t, out_file.Close())
+
+	run_hx(t, archive_path, dst_dir)
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "nested", "hello.txt"))
+	must(t, err)
+	if string(data) != "hello tar.xz" {
+		t.Fatalf("unexpected tar.xz content")
+	}
+}
+
+func TestZstdDecompression(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+	archive_path := filepath.Join(root_dir, "payload.txt.zst")
+
+	out_file, err := os.Create(archive_path)
+	must(t, err)
+	writer, err := (archives.Zstd{}).OpenWriter(out_file)
+	must(t, err)
+	_, err = writer.Write([]byte("hello zstd"))
+	must(t, err)
+	must(t, writer.Close())
+	must(t, out_file.Close())
+
+	run_hx(t, archive_path, dst_dir)
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "payload.txt"))
+	must(t, err)
+	if string(data) != "hello zstd" {
+		t.Fatalf("unexpected zstd content")
 	}
 }
 
