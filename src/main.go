@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -66,6 +67,22 @@ type hx_tui struct {
 	item_count  int
 	total_bytes int64
 }
+
+var (
+	tar_gz_suffixes      = []string{".tar.gz", ".tgz"}
+	tar_suffix           = ".tar"
+	gzip_suffix          = ".gz"
+	zip_suffix           = ".zip"
+	git_suffix           = ".git"
+	github_host          = "github.com"
+	default_download     = "download"
+	done_sentinel_prefix = ".hx.done."
+	done_sentinel_suffix = ".json"
+	tls_retry_message    = "warning: https certificate verification failed, retrying insecurely"
+	windows_path_rx      = regexp.MustCompile(`^[A-Za-z]:[\\/].+`)
+	hex_hash_rx          = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	tls_error_rx         = regexp.MustCompile(`(?i)(x509:|certificate|tls:)`)
+)
 
 // -----------------------------------------------------------------------------
 // TUI
@@ -229,7 +246,7 @@ func (d hx_dst) get_done_sentinel_path() string {
 		d.include_exclude,
 		fmt.Sprintf("%t", d.overwrite),
 	}, "\n")))
-	return filepath.Join(d.path, ".hx.done."+hex.EncodeToString(sum[:16])+".json")
+	return filepath.Join(d.path, done_sentinel_prefix+hex.EncodeToString(sum[:16])+done_sentinel_suffix)
 }
 
 func (d hx_dst) set_done_sentinel(done bool) error {
@@ -527,7 +544,7 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 		}
 		defer gz_reader.Close()
 		return tar_items(tar.NewReader(gz_reader), src_url, yield)
-	case strings.HasSuffix(lower_name, ".tar"):
+	case strings.HasSuffix(lower_name, tar_suffix):
 		defer src_stream.Close()
 		return tar_items(tar.NewReader(src_stream), src_url, yield)
 	case looks_like_gzip(lower_name):
@@ -681,7 +698,7 @@ func download_to_temp(src_url string) (string, error) {
 func download_name(src_url *url.URL) string {
 	name := path.Base(src_url.Path)
 	if name == "." || name == "/" || name == "" {
-		return "download"
+		return default_download
 	}
 	return name
 }
@@ -720,15 +737,15 @@ func normalize_rel_path(raw_path string) string {
 }
 
 func looks_like_tar_gz(name string) bool {
-	return strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz")
+	return has_any_suffix(name, tar_gz_suffixes)
 }
 
 func looks_like_gzip(name string) bool {
-	return strings.HasSuffix(name, ".gz") && !looks_like_tar_gz(name)
+	return strings.HasSuffix(name, gzip_suffix) && !looks_like_tar_gz(name)
 }
 
 func looks_like_zip(name string) bool {
-	return strings.HasSuffix(name, ".zip")
+	return strings.HasSuffix(name, zip_suffix)
 }
 
 func looks_like_http_git_url(src_url *url.URL) bool {
@@ -738,19 +755,11 @@ func looks_like_http_git_url(src_url *url.URL) bool {
 	if src_url.Scheme != "http" && src_url.Scheme != "https" {
 		return false
 	}
-	return strings.HasSuffix(strings.ToLower(src_url.Path), ".git")
+	return strings.HasSuffix(strings.ToLower(src_url.Path), git_suffix)
 }
 
 func looks_like_windows_path(raw_value string) bool {
-	if len(raw_value) < 3 {
-		return false
-	}
-	drive := raw_value[0]
-	if raw_value[1] != ':' {
-		return false
-	}
-	return ((drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z')) &&
-		(raw_value[2] == '\\' || raw_value[2] == '/')
+	return windows_path_rx.MatchString(raw_value)
 }
 
 // GitHub HTTP URLs are rewritten so the rest of the source switch stays schema-based.
@@ -791,12 +800,16 @@ func normalize_github_url(src_url *url.URL) *url.URL {
 func github_clone_url(src_url *url.URL) string {
 	parts := split_clean_path(src_url.Path)
 	owner := parts[0]
-	repo := strings.TrimSuffix(parts[1], ".git")
-	return "https://" + src_url.Host + "/" + owner + "/" + repo + ".git"
+	repo := strings.TrimSuffix(parts[1], git_suffix)
+	return (&url.URL{
+		Scheme: "https",
+		Host:   src_url.Host,
+		Path:   path.Join(owner, repo) + git_suffix,
+	}).String()
 }
 
 func github_http_host() string {
-	return "github.com"
+	return github_host
 }
 
 func split_clean_path(raw_path string) []string {
@@ -811,19 +824,7 @@ func split_clean_path(raw_path string) []string {
 }
 
 func is_hex_hash(raw_value string) bool {
-	if len(raw_value) != 40 {
-		return false
-	}
-	for _, c := range raw_value {
-		if c >= '0' && c <= '9' {
-			continue
-		}
-		if c >= 'a' && c <= 'f' {
-			continue
-		}
-		return false
-	}
-	return true
+	return hex_hash_rx.MatchString(raw_value)
 }
 
 func http_get(src_url string) (*http.Response, bool, error) {
@@ -847,14 +848,20 @@ func http_get(src_url string) (*http.Response, bool, error) {
 }
 
 func looks_like_tls_verify_error(err error) bool {
-	err_text := strings.ToLower(err.Error())
-	return strings.Contains(err_text, "x509:") ||
-		strings.Contains(err_text, "certificate") ||
-		strings.Contains(err_text, "tls:")
+	return tls_error_rx.MatchString(err.Error())
 }
 
 func warn_tls_retry() {
-	fmt.Fprintln(os.Stderr, "warning: https certificate verification failed, retrying insecurely")
+	fmt.Fprintln(os.Stderr, tls_retry_message)
+}
+
+func has_any_suffix(raw_value string, suffixes []string) bool {
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(raw_value, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func stop_to_nil(keep_going bool) error {
