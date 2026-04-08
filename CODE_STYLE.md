@@ -6,9 +6,9 @@
 
 - use snake_case when possible but only if there are no target language limits and the code will feel natural anyway
 
-- comment in a succint way and always when there is ambiguity be proportional to the context, for example a small function of 7 lines need only a not too long general comment about why is needed, about arguments and output, but if its doing something peculiar that needs attention comment it more profoundly
+- you must comment in a succint way and always when there is ambiguity, be proportional to the context, for example a small function of 7 lines need only a not too long general comment about why is needed, about arguments and output, but if its doing something peculiar that needs attention comment it more profoundly
 
-- also place section comments like an horizontal line with a comment about ok there are all the utility functions and then keep the functions and code ordered to attain to the sections
+- place section comments like an horizontal line with a comment about ok there are all the utility functions and then keep the functions and code ordered to attain to the sections
 
 - never grow the number of functions/classes/structs etc without a good reason, think if you can adapt an already available function adding one optional parameter while keeping backward compatibility or reuse something in a meaningful way that feels natural and make sense, it other word really add things if really needed
 
@@ -35,3 +35,5 @@
 - keep error handling minimal
 
 - centralize log and error reporting
+
+- remember to use generators/async generators when the language support it dont use callbacks and events if a generator/yield/loop can be used
