@@ -69,12 +69,6 @@ jobs:
           cd repo
           ${{ matrix.package_command }}
 
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: repo/${{ matrix.archive_name }}
-
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
