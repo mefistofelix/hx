@@ -47,3 +47,12 @@
 - 1/2/3 lines functions smells like bad modularization, avoid them be careful and inline the code
 
 - also function with just one caller are bad modularization, keep the logic inline if so
+
+- preferred libs for golang:
+  jsonata: https://github.com/RecoLabs/gnata
+  archive extraction: https://github.com/mholt/archives
+  yaml: https://github.com/yaml/go-yaml
+  xpath: https://github.com/speedata/goxpath
+  doublestar glob: https://github.com/bmatcuk/doublestar
+
+- ask for any additional third party library dependency
