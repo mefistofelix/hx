@@ -34,10 +34,13 @@ hx [flags] <source> [dest]
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-strip N`, `-skip N` | `0` | Strip `N` leading path components from extracted entries |
-| `-symlinks` | `false` | Preserve symlinks when the source provides them and the platform supports them |
-| `-download-only`, `-do` | `false` | Download or copy the source as a single file without extraction |
-| `-notmp`, `-no-tempfile` | `false` | Refuse the temp-file fallback used for HTTP ZIP extraction |
-| `-quiet`, `-q` | `false` | Use plain output instead of the ANSI status line |
+| `-symlinks 0|1` | `1` | Preserve symlinks when the source provides them and the platform supports them |
+| `-download-only 0|1`, `-do 0|1` | `0` | Download or copy the source as a single file without extraction |
+| `-notmp 0|1`, `-no-tempfile 0|1` | `0` | Refuse the temp-file fallback used for HTTP ZIP extraction |
+| `-platform OS/ARCH[/VARIANT]`, `-plat ...` | host-specific | Select the target platform for sources that use it |
+| `-registry VALUE`, `-reg VALUE` | auto | Override the registry or repository base for supported source types |
+| `-target VALUE`, `-t VALUE` | auto | Select a repository-specific target such as distro release or framework |
+| `-quiet 0|1`, `-q 0|1` | `0` | Use plain output instead of the ANSI status line |
 | `-incexc RULES` | `:+` | Apply ordered include/exclude rules to extracted paths |
 
 ## Behavior

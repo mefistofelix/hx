@@ -77,6 +77,10 @@ type hx_tui struct {
 	total_bytes int64
 }
 
+type bool_flag struct {
+	value *bool
+}
+
 var (
 	tar_gz_suffixes      = []string{".tar.gz", ".tgz"}
 	tar_suffix           = ".tar"
@@ -85,7 +89,7 @@ var (
 	deb_suffix           = ".deb"
 	rpm_suffix           = ".rpm"
 	zip_suffixes         = []string{".zip", ".nupkg"}
-	archives_suffixes    = []string{".7z", ".rar", ".br", ".bz2", ".lz", ".lz4", ".mz", ".s2", ".sz", ".xz", ".zz", ".zst"}
+	archives_suffixes    = []string{".7z", ".rar", ".cpio", ".br", ".bz2", ".lz", ".lz4", ".mz", ".s2", ".sz", ".xz", ".zz", ".zst"}
 	git_suffix           = ".git"
 	github_host          = "github.com"
 	default_download     = "download"
@@ -105,6 +109,53 @@ var (
 // -----------------------------------------------------------------------------
 // TUI
 // -----------------------------------------------------------------------------
+
+func (b bool_flag) String() string {
+	if b.value == nil || !*b.value {
+		return "0"
+	}
+	return "1"
+}
+
+func (b bool_flag) Set(raw_value string) error {
+	switch strings.TrimSpace(strings.ToLower(raw_value)) {
+	case "", "1", "true", "t", "yes", "y", "on":
+		*b.value = true
+		return nil
+	case "0", "false", "f", "no", "n", "off":
+		*b.value = false
+		return nil
+	default:
+		return fmt.Errorf("invalid boolean value: %s", raw_value)
+	}
+}
+
+func looks_like_bool_value(raw_value string) bool {
+	switch strings.TrimSpace(strings.ToLower(raw_value)) {
+	case "0", "1", "true", "false", "t", "f", "yes", "no", "y", "n", "on", "off":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalize_bool_flag_args(args []string, bool_flags map[string]bool) []string {
+	normalized := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !bool_flags[arg] || strings.Contains(arg, "=") {
+			normalized = append(normalized, arg)
+			continue
+		}
+		if i+1 < len(args) && looks_like_bool_value(args[i+1]) {
+			normalized = append(normalized, arg+"="+args[i+1])
+			i++
+			continue
+		}
+		normalized = append(normalized, arg+"=1")
+	}
+	return normalized
+}
 
 func (h *hx_tui) warn(msg string) {
 	fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
@@ -2441,18 +2492,26 @@ func has_suffix_fold(raw_value string, suffixes ...string) bool {
 // -----------------------------------------------------------------------------
 
 func main() {
+	os.Args = append([]string{os.Args[0]}, normalize_bool_flag_args(os.Args[1:], map[string]bool{
+		"-symlinks":      true,
+		"-download-only": true,
+		"-do":            true,
+		"-notmp":         true,
+		"-no-tempfile":   true,
+		"-quiet":         true,
+		"-q":             true,
+		"-overwrite":     true,
+	})...)
+
 	src := hx_src{}
 	dst := hx_dst{}
 	tui := &hx_tui{mode: "ansi"}
-	keep_symlinks := false
+	keep_symlinks := true
+	quiet := false
+	overwrite := true
 
 	flag.IntVar(&dst.skip_path_prefix, "strip", 0, "strip N leading path components")
 	flag.IntVar(&dst.skip_path_prefix, "skip", 0, "strip N leading path components")
-	flag.BoolVar(&keep_symlinks, "symlinks", false, "keep symlinks when supported")
-	flag.BoolVar(&src.download_only, "download-only", false, "download without extraction")
-	flag.BoolVar(&src.download_only, "do", false, "download without extraction")
-	flag.BoolVar(&src.force_no_tmp, "notmp", false, "avoid temp-file fallback")
-	flag.BoolVar(&src.force_no_tmp, "no-tempfile", false, "avoid temp-file fallback")
 	flag.StringVar(&src.platform, "platform", runtime.GOOS+"/"+runtime.GOARCH, "target platform")
 	flag.StringVar(&src.platform, "plat", runtime.GOOS+"/"+runtime.GOARCH, "target platform")
 	flag.StringVar(&src.registry_base_url, "registry", "", "registry override")
@@ -2460,16 +2519,21 @@ func main() {
 	flag.StringVar(&src.target, "target", "", "target override")
 	flag.StringVar(&src.target, "t", "", "target override")
 	flag.StringVar(&dst.include_exclude, "incexc", ":+", "include/exclude rules")
-	quiet := flag.Bool("quiet", false, "plain output")
-	flag.BoolVar(quiet, "q", false, "plain output")
-	overwrite := flag.Bool("overwrite", true, "overwrite files")
+	flag.Var(bool_flag{&keep_symlinks}, "symlinks", "keep symlinks when supported")
+	flag.Var(bool_flag{&src.download_only}, "download-only", "download without extraction")
+	flag.Var(bool_flag{&src.download_only}, "do", "download without extraction")
+	flag.Var(bool_flag{&src.force_no_tmp}, "notmp", "avoid temp-file fallback")
+	flag.Var(bool_flag{&src.force_no_tmp}, "no-tempfile", "avoid temp-file fallback")
+	flag.Var(bool_flag{&quiet}, "quiet", "plain output")
+	flag.Var(bool_flag{&quiet}, "q", "plain output")
+	flag.Var(bool_flag{&overwrite}, "overwrite", "overwrite files")
 	flag.Parse()
 
-	if *quiet {
+	if quiet {
 		tui.mode = "plain"
 	}
 	dst.skip_symlinks = !keep_symlinks
-	dst.overwrite = *overwrite
+	dst.overwrite = overwrite
 	dst.tui = tui
 
 	args := flag.Args()

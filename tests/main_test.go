@@ -83,6 +83,21 @@ func TestZstdDecompression(t *testing.T) {
 	}
 }
 
+func TestBooleanStyleFlags(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+	src_path := filepath.Join(root_dir, "payload.txt")
+
+	must(t, os.WriteFile(src_path, []byte("plain"), 0o644))
+	run_hx(t, "-q", "1", "-symlinks", "0", src_path, dst_dir)
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "payload.txt"))
+	must(t, err)
+	if string(data) != "plain" {
+		t.Fatalf("unexpected boolean flag run content")
+	}
+}
+
 func TestGitHubRepositoryExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
