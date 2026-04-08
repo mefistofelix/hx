@@ -706,7 +706,11 @@ func parse_src_url(raw_value string) (*url.URL, string) {
 
 func file_url_path(parsed *url.URL) string {
 	if parsed.Host == "" {
-		return filepath.FromSlash(parsed.Path)
+		file_path := filepath.FromSlash(parsed.Path)
+		if len(file_path) >= 3 && (file_path[0] == '\\' || file_path[0] == '/') && file_path[2] == ':' {
+			return file_path[1:]
+		}
+		return file_path
 	}
 	return filepath.FromSlash("//" + parsed.Host + parsed.Path)
 }
@@ -788,19 +792,11 @@ func github_clone_url(src_url *url.URL) string {
 	parts := split_clean_path(src_url.Path)
 	owner := parts[0]
 	repo := strings.TrimSuffix(parts[1], ".git")
-	base_url := strings.TrimRight(os.Getenv("HX_GITHUB_CLONE_BASE_URL"), "/")
-	if base_url != "" {
-		return base_url + "/" + owner + "/" + repo + ".git"
-	}
 	return "https://" + src_url.Host + "/" + owner + "/" + repo + ".git"
 }
 
 func github_http_host() string {
-	host := strings.TrimSpace(os.Getenv("HX_GITHUB_HTTP_HOST"))
-	if host == "" {
-		return "github.com"
-	}
-	return host
+	return "github.com"
 }
 
 func split_clean_path(raw_path string) []string {
