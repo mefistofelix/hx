@@ -18,7 +18,7 @@ hx [flags] <source> [dest]
 - `http://` and `https://` Git repository URLs ending in `.git`
 - `git://` repository URLs
 - GitHub repository URLs such as `https://github.com/owner/repo`, `/tree/<ref>`, and `/commit/<sha>`
-- `pypi://package` sources, with `-target` used as an optional version selector
+- `pypi://package` and `pypi://package@version` sources
 
 `dest` defaults to the current directory.
 
@@ -52,7 +52,7 @@ hx https://example.com/project.tar.gz ./out
 hx https://example.com/project.git ./out
 hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
-hx -registry https://pypi.org -target 2.32.3 pypi://requests ./out
+hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -download-only https://example.com/file.zip ./downloads
 hx -strip 1 ./sample.tar.gz ./out
 ```

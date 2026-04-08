@@ -118,7 +118,7 @@ func TestPyPIExtraction(t *testing.T) {
 	}))
 	defer server.Close()
 
-	output := run_hx(t, "-registry", server.URL, "-target", "1.2.3", "pypi://demo", dst_dir)
+	output := run_hx(t, "-registry", server.URL, "pypi://demo@1.2.3", dst_dir)
 	if strings.Contains(output, "error:") {
 		t.Fatalf("unexpected output: %q", output)
 	}
