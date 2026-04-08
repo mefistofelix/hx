@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +24,10 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
+
+// -----------------------------------------------------------------------------
+// Core state
+// -----------------------------------------------------------------------------
 
 type hx_src struct {
 	url               string
@@ -61,6 +66,10 @@ type hx_tui struct {
 	total_bytes int64
 }
 
+// -----------------------------------------------------------------------------
+// TUI
+// -----------------------------------------------------------------------------
+
 func (h *hx_tui) warn(msg string) {
 	fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
 }
@@ -77,11 +86,25 @@ func (h *hx_tui) show_item(item hx_item) {
 	fmt.Printf("\ritems=%d bytes=%d last=%s", h.item_count, h.total_bytes, item.dst_full_path)
 }
 
-func (s hx_src) items(yield func(hx_item) bool) error {
+// -----------------------------------------------------------------------------
+// Source iteration
+// -----------------------------------------------------------------------------
+
+// items normalizes the input source and exposes it as a single item stream.
+func (s hx_src) items() iter.Seq2[hx_item, error] {
+	return func(yield func(hx_item, error) bool) {
+		if err := s.emit_items(yield); err != nil {
+			yield(hx_item{}, err)
+		}
+	}
+}
+
+func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 	src_url, local_path := parse_src_url(s.url)
 	if is_github_http_url(src_url) {
 		src_url = normalize_github_url(src_url)
 	}
+
 	switch src_url.Scheme {
 	case "", "file":
 		return s.items_from_local(local_path, yield)
@@ -96,7 +119,7 @@ func (s hx_src) items(yield func(hx_item) bool) error {
 	}
 }
 
-func (s hx_src) items_from_local(local_path string, yield func(hx_item) bool) error {
+func (s hx_src) items_from_local(local_path string, yield func(hx_item, error) bool) error {
 	info, err := os.Lstat(local_path)
 	if err != nil {
 		return err
@@ -115,24 +138,12 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item) bool) er
 			src_url:       s.url,
 			src_full_path: filepath.Base(local_path),
 			size:          info.Size(),
-		}))
+		}, nil))
 	}
 	return stream_items(filepath.Base(local_path), s.url, info.Size(), open_local_stream(local_path), yield)
 }
 
-func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item) bool) error {
-	if s.download_only {
-		return errors.New("download-only is not implemented for git sources")
-	}
-	work_dir, err := clone_git_repo(clone_url, ref)
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(work_dir)
-	return walk_local_dir(work_dir, true, clone_url, yield)
-}
-
-func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item) bool) error {
+func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) bool) error {
 	if s.download_only {
 		resp, err := http.Get(src_url.String())
 		if err != nil {
@@ -149,7 +160,7 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item) bool) erro
 			src_full_path:   download_name(src_url),
 			size_compressed: resp.ContentLength,
 			size:            resp.ContentLength,
-		}))
+		}, nil))
 	}
 	if looks_like_zip(src_url.Path) {
 		if s.force_no_tmp {
@@ -166,6 +177,7 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item) bool) erro
 		}
 		return stream_items(filepath.Base(src_url.Path), src_url.String(), info.Size(), open_local_stream(tmp_path), yield)
 	}
+
 	resp, err := http.Get(src_url.String())
 	if err != nil {
 		return err
@@ -176,6 +188,22 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item) bool) erro
 	}
 	return stream_items(filepath.Base(src_url.Path), src_url.String(), resp.ContentLength, resp.Body, yield)
 }
+
+func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item, error) bool) error {
+	if s.download_only {
+		return errors.New("download-only is not implemented for git sources")
+	}
+	work_dir, err := clone_git_repo(clone_url, ref)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work_dir)
+	return walk_local_dir(work_dir, true, clone_url, yield)
+}
+
+// -----------------------------------------------------------------------------
+// Destination flow
+// -----------------------------------------------------------------------------
 
 func (d hx_dst) get_done_sentinel_path() string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
@@ -219,32 +247,31 @@ func (d hx_dst) copy() error {
 	if err := os.MkdirAll(d.path, 0o755); err != nil {
 		return err
 	}
-	var copy_err error
-	err := d.src.items(func(item hx_item) bool {
-		if item.type_name == "link" && d.skip_symlinks {
-			return true
+
+	for item, err := range d.src.items() {
+		if err != nil {
+			return err
 		}
+		if item.type_name == "link" && d.skip_symlinks {
+			continue
+		}
+
 		dst_rel_path, keep := d.dst_rel_path(item.src_full_path)
 		if !keep || !d.allow_item(dst_rel_path) {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}
-			return true
+			continue
 		}
+
 		item.dst_full_path = filepath.Join(d.path, filepath.FromSlash(dst_rel_path))
 		d.tui.show_item(item)
-		if copy_err = d.copy_item(item); copy_err != nil {
-			d.tui.warn(copy_err.Error())
-			return false
+		if err := d.copy_item(item); err != nil {
+			d.tui.warn(err.Error())
+			return err
 		}
-		return true
-	})
-	if err != nil {
-		return err
 	}
-	if copy_err != nil {
-		return copy_err
-	}
+
 	if d.tui.mode != "plain" && d.tui.item_count > 0 {
 		fmt.Println()
 	}
@@ -260,20 +287,19 @@ func (d hx_dst) dst_rel_path(src_full_path string) (string, bool) {
 			filtered = append(filtered, part)
 		}
 	}
-	if len(filtered) == 0 {
-		return "", false
-	}
-	if d.skip_path_prefix >= len(filtered) {
+	if len(filtered) == 0 || d.skip_path_prefix >= len(filtered) {
 		return "", false
 	}
 	return strings.Join(filtered[d.skip_path_prefix:], "/"), true
 }
 
+// allow_item applies the ordered + / - rules after path stripping.
 func (d hx_dst) allow_item(rel_path string) bool {
 	rules := strings.TrimSpace(d.include_exclude)
 	if rules == "" || rules == ":+ " || rules == ":+" {
 		return true
 	}
+
 	allowed := false
 	for _, raw_rule := range strings.FieldsFunc(rules, func(r rune) bool { return r == ',' || r == ';' }) {
 		rule := strings.TrimSpace(raw_rule)
@@ -360,26 +386,9 @@ func (d hx_dst) copy_file(item hx_item) error {
 	return err
 }
 
-func parse_src_url(raw_value string) (*url.URL, string) {
-	if looks_like_windows_path(raw_value) {
-		return &url.URL{}, raw_value
-	}
-	parsed, err := url.Parse(raw_value)
-	if err != nil || parsed.Scheme == "" {
-		return &url.URL{}, raw_value
-	}
-	if parsed.Scheme == "file" {
-		return parsed, file_url_path(parsed)
-	}
-	return parsed, raw_value
-}
-
-func file_url_path(parsed *url.URL) string {
-	if parsed.Host == "" {
-		return filepath.FromSlash(parsed.Path)
-	}
-	return filepath.FromSlash("//" + parsed.Host + parsed.Path)
-}
+// -----------------------------------------------------------------------------
+// Local and git helpers
+// -----------------------------------------------------------------------------
 
 func local_fs_item(current_path string, rel_path string, src_url string) (hx_item, error) {
 	info, err := os.Lstat(current_path)
@@ -414,7 +423,8 @@ func local_fs_item(current_path string, rel_path string, src_url string) (hx_ite
 	return item, nil
 }
 
-func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield func(hx_item) bool) error {
+// walk_local_dir is shared by real local sources and cloned git worktrees.
+func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield func(hx_item, error) bool) error {
 	return filepath.WalkDir(local_path, func(current_path string, entry os.DirEntry, walk_err error) error {
 		if walk_err != nil {
 			return walk_err
@@ -433,7 +443,7 @@ func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield 
 		if err != nil {
 			return err
 		}
-		if !yield(item) {
+		if !yield(item, nil) {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}
@@ -451,6 +461,7 @@ func open_local_stream(local_path string) io.ReadCloser {
 	return file
 }
 
+// clone_git_repo materializes the repo once so the rest of the pipeline stays path-based.
 func clone_git_repo(clone_url string, ref string) (string, error) {
 	work_dir, err := os.MkdirTemp("", "hx-git-*")
 	if err != nil {
@@ -477,8 +488,7 @@ func clone_git_repo(clone_url string, ref string) (string, error) {
 		os.RemoveAll(work_dir)
 		return "", err
 	}
-	checkout_opts := resolve_checkout_options(ref)
-	if err := worktree.Checkout(checkout_opts); err != nil {
+	if err := worktree.Checkout(resolve_checkout_options(ref)); err != nil {
 		os.RemoveAll(work_dir)
 		return "", err
 	}
@@ -492,7 +502,11 @@ func resolve_checkout_options(ref string) *git.CheckoutOptions {
 	return &git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(ref)}
 }
 
-func stream_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item) bool) error {
+// -----------------------------------------------------------------------------
+// Format readers
+// -----------------------------------------------------------------------------
+
+func stream_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item, error) bool) error {
 	lower_name := strings.ToLower(name)
 	switch {
 	case looks_like_tar_gz(lower_name):
@@ -513,15 +527,13 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 			return err
 		}
 		defer gz_reader.Close()
-		data_stream := io.NopCloser(gz_reader)
-		dst_name := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
 		return stop_to_nil(yield(hx_item{
-			src_stream:      data_stream,
+			src_stream:      io.NopCloser(gz_reader),
 			type_name:       "file",
 			src_url:         src_url,
-			src_full_path:   dst_name,
+			src_full_path:   strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)),
 			size_compressed: src_size,
-		}))
+		}, nil))
 	case looks_like_zip(lower_name):
 		defer src_stream.Close()
 		tmp_file, err := os.CreateTemp("", "hx-local-zip-*.zip")
@@ -545,11 +557,11 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 			src_full_path:   filepath.Base(name),
 			size_compressed: src_size,
 			size:            src_size,
-		}))
+		}, nil))
 	}
 }
 
-func tar_items(tr *tar.Reader, src_url string, yield func(hx_item) bool) error {
+func tar_items(tr *tar.Reader, src_url string, yield func(hx_item, error) bool) error {
 	for {
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -576,7 +588,7 @@ func tar_items(tr *tar.Reader, src_url string, yield func(hx_item) bool) error {
 		default:
 			item.src_stream = io.NopCloser(io.LimitReader(tr, header.Size))
 		}
-		if !yield(item) {
+		if !yield(item, nil) {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}
@@ -585,7 +597,7 @@ func tar_items(tr *tar.Reader, src_url string, yield func(hx_item) bool) error {
 	}
 }
 
-func zip_items(zip_path string, src_url string, yield func(hx_item) bool) error {
+func zip_items(zip_path string, src_url string, yield func(hx_item, error) bool) error {
 	reader, err := zip.OpenReader(zip_path)
 	if err != nil {
 		return err
@@ -622,7 +634,7 @@ func zip_items(zip_path string, src_url string, yield func(hx_item) bool) error 
 			}
 			item.src_stream = rc
 		}
-		if !yield(item) {
+		if !yield(item, nil) {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}
@@ -661,6 +673,31 @@ func download_name(src_url *url.URL) string {
 	return name
 }
 
+// -----------------------------------------------------------------------------
+// Source parsing helpers
+// -----------------------------------------------------------------------------
+
+func parse_src_url(raw_value string) (*url.URL, string) {
+	if looks_like_windows_path(raw_value) {
+		return &url.URL{}, raw_value
+	}
+	parsed, err := url.Parse(raw_value)
+	if err != nil || parsed.Scheme == "" {
+		return &url.URL{}, raw_value
+	}
+	if parsed.Scheme == "file" {
+		return parsed, file_url_path(parsed)
+	}
+	return parsed, raw_value
+}
+
+func file_url_path(parsed *url.URL) string {
+	if parsed.Host == "" {
+		return filepath.FromSlash(parsed.Path)
+	}
+	return filepath.FromSlash("//" + parsed.Host + parsed.Path)
+}
+
 func normalize_rel_path(raw_path string) string {
 	return strings.TrimPrefix(filepath.ToSlash(filepath.Clean(raw_path)), "./")
 }
@@ -685,10 +722,11 @@ func looks_like_windows_path(raw_value string) bool {
 	if raw_value[1] != ':' {
 		return false
 	}
-	return (drive >= 'a' && drive <= 'z' || drive >= 'A' && drive <= 'Z') &&
+	return ((drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z')) &&
 		(raw_value[2] == '\\' || raw_value[2] == '/')
 }
 
+// GitHub HTTP URLs are rewritten so the rest of the source switch stays schema-based.
 func is_github_http_url(src_url *url.URL) bool {
 	if src_url == nil {
 		return false
@@ -787,6 +825,10 @@ func (e error_read_closer) Read(_ []byte) (int, error) {
 func (e error_read_closer) Close() error {
 	return nil
 }
+
+// -----------------------------------------------------------------------------
+// CLI
+// -----------------------------------------------------------------------------
 
 func main() {
 	src := hx_src{}
