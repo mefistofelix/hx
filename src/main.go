@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/klauspost/compress/zstd"
+	rpmutils "github.com/sassoftware/go-rpmutils"
 	"github.com/ulikunitz/xz"
 )
 
@@ -78,6 +80,7 @@ var (
 	gzip_suffix          = ".gz"
 	apk_suffix           = ".apk"
 	deb_suffix           = ".deb"
+	rpm_suffix           = ".rpm"
 	zip_suffixes         = []string{".zip", ".nupkg"}
 	git_suffix           = ".git"
 	github_host          = "github.com"
@@ -87,6 +90,8 @@ var (
 	tls_retry_message    = "warning: https certificate verification failed, retrying insecurely"
 	apt_default_registry = "https://deb.debian.org/debian"
 	apt_default_target   = "stable/main"
+	rpm_default_registry = "https://download.fedoraproject.org/pub/fedora/linux/releases"
+	rpm_default_target   = "41/Everything"
 	hex_hash_rx          = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	tls_error_rx         = regexp.MustCompile(`(?i)(x509:|certificate|tls:)`)
 	apt_dep_name_rx      = regexp.MustCompile(`[a-z0-9][a-z0-9+.-]*`)
@@ -150,6 +155,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_docker(src_url, yield)
 	case "apt":
 		return s.items_from_apt(src_url, yield)
+	case "rpm":
+		return s.items_from_rpm(src_url, yield)
 	case "apk":
 		return s.items_from_apk(src_url, yield)
 	default:
@@ -707,6 +714,273 @@ func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item, error) bool
 	return nil
 }
 
+func (s hx_src) items_from_rpm(src_url *url.URL, yield func(hx_item, error) bool) error {
+	package_name := src_url.Host
+	version := ""
+	if src_url.User != nil {
+		package_name = src_url.User.Username()
+		version = src_url.Host
+	}
+	if package_name == "" || package_name == "." {
+		return errors.New("rpm source requires a package name")
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = rpm_default_registry
+	}
+	repo_target := strings.Trim(strings.TrimSpace(s.target), "/")
+	if repo_target == "" {
+		repo_target = rpm_default_target
+	}
+
+	platform_arch := split_platform_name(s.platform)[1]
+	if platform_arch == "" {
+		platform_arch = runtime.GOARCH
+	}
+	switch platform_arch {
+	case "amd64":
+		platform_arch = "x86_64"
+	case "386":
+		platform_arch = "i686"
+	case "arm64":
+		platform_arch = "aarch64"
+	}
+
+	repo_base_url := registry_base_url + "/" + repo_target + "/" + platform_arch + "/os"
+	repomd_url := repo_base_url + "/repodata/repomd.xml"
+	repomd_resp, insecure_retry, err := http_get(repomd_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	defer repomd_resp.Body.Close()
+	if repomd_resp.StatusCode < 200 || repomd_resp.StatusCode > 299 {
+		return fmt.Errorf("rpm metadata request failed: %s", repomd_resp.Status)
+	}
+
+	var repomd struct {
+		Data []struct {
+			Type     string `xml:"type,attr"`
+			Location struct {
+				Href string `xml:"href,attr"`
+			} `xml:"location"`
+		} `xml:"data"`
+	}
+	if err := xml.NewDecoder(repomd_resp.Body).Decode(&repomd); err != nil {
+		return err
+	}
+
+	primary_href := ""
+	for _, data := range repomd.Data {
+		if data.Type == "primary" {
+			primary_href = data.Location.Href
+			break
+		}
+	}
+	if primary_href == "" {
+		return errors.New("rpm metadata returned no primary index")
+	}
+
+	primary_url := repo_base_url + "/" + strings.TrimPrefix(primary_href, "/")
+	primary_resp, insecure_retry, err := http_get(primary_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	defer primary_resp.Body.Close()
+	if primary_resp.StatusCode < 200 || primary_resp.StatusCode > 299 {
+		return fmt.Errorf("rpm primary index request failed: %s", primary_resp.Status)
+	}
+
+	var primary_reader io.Reader = primary_resp.Body
+	if strings.HasSuffix(strings.ToLower(primary_url), gzip_suffix) {
+		gz_reader, err := gzip.NewReader(primary_resp.Body)
+		if err != nil {
+			return err
+		}
+		defer gz_reader.Close()
+		primary_reader = gz_reader
+	}
+
+	decoder := xml.NewDecoder(primary_reader)
+	rpm_packages := map[string][]map[string]any{}
+	rpm_providers := map[string]string{}
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "package" {
+			continue
+		}
+
+		var pkg struct {
+			Name    string `xml:"name"`
+			Arch    string `xml:"arch"`
+			Version struct {
+				Epoch string `xml:"epoch,attr"`
+				Ver   string `xml:"ver,attr"`
+				Rel   string `xml:"rel,attr"`
+			} `xml:"version"`
+			Location struct {
+				Href string `xml:"href,attr"`
+			} `xml:"location"`
+			Format struct {
+				Provides []struct {
+					Name string `xml:"name,attr"`
+				} `xml:"provides>entry"`
+				Requires []struct {
+					Name string `xml:"name,attr"`
+				} `xml:"requires>entry"`
+			} `xml:"format"`
+		}
+		if err := decoder.DecodeElement(&pkg, &start); err != nil {
+			return err
+		}
+		if pkg.Name == "" || pkg.Location.Href == "" {
+			continue
+		}
+		if pkg.Arch != platform_arch && pkg.Arch != "noarch" {
+			continue
+		}
+
+		version_text := pkg.Version.Ver
+		if pkg.Version.Rel != "" {
+			version_text += "-" + pkg.Version.Rel
+		}
+		full_version_text := version_text
+		if pkg.Version.Epoch != "" && pkg.Version.Epoch != "0" {
+			full_version_text = pkg.Version.Epoch + ":" + version_text
+		}
+
+		rpm_package := map[string]any{
+			"name":     pkg.Name,
+			"arch":     pkg.Arch,
+			"version":  version_text,
+			"fullver":  full_version_text,
+			"location": pkg.Location.Href,
+			"requires": []string{},
+			"provides": []string{},
+		}
+		for _, provide := range pkg.Format.Provides {
+			if provide.Name == "" {
+				continue
+			}
+			rpm_package["provides"] = append(rpm_package["provides"].([]string), provide.Name)
+			if rpm_providers[provide.Name] == "" {
+				rpm_providers[provide.Name] = pkg.Name
+			}
+		}
+		if rpm_providers[pkg.Name] == "" {
+			rpm_providers[pkg.Name] = pkg.Name
+		}
+		for _, require := range pkg.Format.Requires {
+			if require.Name == "" || strings.HasPrefix(require.Name, "rpmlib(") {
+				continue
+			}
+			rpm_package["requires"] = append(rpm_package["requires"].([]string), require.Name)
+		}
+		rpm_packages[pkg.Name] = append(rpm_packages[pkg.Name], rpm_package)
+	}
+
+	resolved_packages := map[string]map[string]any{}
+	resolving_packages := map[string]bool{}
+	resolved_order := make([]map[string]any, 0)
+
+	var resolve_package func(string, string) error
+	resolve_package = func(current_package string, requested_version string) error {
+		if resolved_packages[current_package] != nil {
+			if requested_version == "" ||
+				resolved_packages[current_package]["version"] == requested_version ||
+				resolved_packages[current_package]["fullver"] == requested_version {
+				return nil
+			}
+		}
+		if resolving_packages[current_package] {
+			return nil
+		}
+
+		selected_package := map[string]any(nil)
+		for _, candidate := range rpm_packages[current_package] {
+			if requested_version != "" &&
+				candidate["version"] != requested_version &&
+				candidate["fullver"] != requested_version {
+				continue
+			}
+			selected_package = candidate
+			if candidate["arch"] == platform_arch {
+				break
+			}
+		}
+		if selected_package == nil {
+			return fmt.Errorf("rpm metadata returned no matching package: %s", current_package)
+		}
+
+		resolving_packages[current_package] = true
+		for _, dependency_name := range selected_package["requires"].([]string) {
+			if dependency_name == "" {
+				continue
+			}
+			if rpm_providers[dependency_name] != "" {
+				dependency_name = rpm_providers[dependency_name]
+			}
+			if rpm_packages[dependency_name] == nil || dependency_name == current_package {
+				continue
+			}
+			if err := resolve_package(dependency_name, ""); err != nil {
+				return err
+			}
+		}
+		resolving_packages[current_package] = false
+		resolved_packages[current_package] = selected_package
+		resolved_order = append(resolved_order, selected_package)
+		return nil
+	}
+
+	if err := resolve_package(package_name, version); err != nil {
+		return err
+	}
+
+	for _, resolved_package := range resolved_order {
+		artifact_url := repo_base_url + "/" + strings.TrimPrefix(resolved_package["location"].(string), "/")
+		artifact_resp, insecure_retry, err := http_get(artifact_url)
+		if err != nil {
+			return err
+		}
+		if insecure_retry {
+			fmt.Fprintln(os.Stderr, tls_retry_message)
+		}
+		if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
+			defer artifact_resp.Body.Close()
+			return fmt.Errorf("rpm download failed: %s", artifact_resp.Status)
+		}
+		if s.download_only {
+			yield(hx_item{
+				src_stream:      artifact_resp.Body,
+				type_name:       "file",
+				src_url:         artifact_url,
+				src_full_path:   path.Base(artifact_url),
+				size_compressed: artifact_resp.ContentLength,
+				size:            artifact_resp.ContentLength,
+			}, nil)
+			continue
+		}
+		if err := stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool) error {
 	package_name := src_url.Host
 	version := ""
@@ -1227,6 +1501,9 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 	case strings.HasSuffix(lower_name, deb_suffix):
 		defer src_stream.Close()
 		return deb_items(src_url, src_stream, yield)
+	case strings.HasSuffix(lower_name, rpm_suffix):
+		defer src_stream.Close()
+		return rpm_items(src_url, src_stream, yield)
 	default:
 		yield(hx_item{
 			src_stream:      src_stream,
@@ -1237,6 +1514,63 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 			size:            src_size,
 		}, nil)
 		return nil
+	}
+}
+
+func rpm_items(src_url string, src_stream io.Reader, yield func(hx_item, error) bool) error {
+	pkg, err := rpmutils.ReadRpm(src_stream)
+	if err != nil {
+		return err
+	}
+	payload_reader, err := pkg.PayloadReaderExtended()
+	if err != nil {
+		return err
+	}
+	for {
+		header, err := payload_reader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		normalized_path := normalize_rel_path(header.Name())
+		if normalized_path == "" {
+			if cleaned_header := strings.Trim(path.Clean(strings.ReplaceAll(header.Name(), "\\", "/")), "/"); cleaned_header == "" || cleaned_header == "." {
+				continue
+			}
+			return fmt.Errorf("invalid archive path: %s", header.Name())
+		}
+
+		item := hx_item{
+			type_name:      "file",
+			src_url:        src_url,
+			src_full_path:  normalized_path,
+			size_extracted: header.Size(),
+			size:           header.Size(),
+		}
+		switch header.Mode() & 0o170000 {
+		case 0o040000:
+			item.type_name = "dir"
+			item.size = 0
+		case 0o120000:
+			item.type_name = "link"
+			item.src_link_path = header.Linkname()
+			item.size = 0
+		default:
+			if payload_reader.IsLink() {
+				item.size = 0
+				item.src_stream = io.NopCloser(strings.NewReader(""))
+			} else {
+				item.src_stream = io.NopCloser(io.LimitReader(payload_reader, header.Size()))
+			}
+		}
+		if !yield(item, nil) {
+			if item.src_stream != nil {
+				_ = item.src_stream.Close()
+			}
+			return nil
+		}
 	}
 }
 
