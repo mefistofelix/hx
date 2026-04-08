@@ -19,6 +19,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 type hx_src struct {
@@ -76,11 +79,18 @@ func (h *hx_tui) show_item(item hx_item) {
 
 func (s hx_src) items(yield func(hx_item) bool) error {
 	src_url, local_path := parse_src_url(s.url)
+	if is_github_http_url(src_url) {
+		src_url = normalize_github_url(src_url)
+	}
 	switch src_url.Scheme {
 	case "", "file":
 		return s.items_from_local(local_path, yield)
 	case "http", "https":
 		return s.items_from_http(src_url, yield)
+	case "git":
+		return s.items_from_git(src_url.String(), src_url.Query().Get("ref"), yield)
+	case "github":
+		return s.items_from_git(github_clone_url(src_url), src_url.Query().Get("ref"), yield)
 	default:
 		return fmt.Errorf("unsupported source scheme: %s", src_url.Scheme)
 	}
@@ -92,29 +102,7 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item) bool) er
 		return err
 	}
 	if info.IsDir() {
-		return filepath.WalkDir(local_path, func(current_path string, entry os.DirEntry, walk_err error) error {
-			if walk_err != nil {
-				return walk_err
-			}
-			if current_path == local_path {
-				return nil
-			}
-			rel_path, err := filepath.Rel(local_path, current_path)
-			if err != nil {
-				return err
-			}
-			item, err := local_fs_item(current_path, rel_path, "file://"+filepath.ToSlash(current_path))
-			if err != nil {
-				return err
-			}
-			if !yield(item) {
-				if item.src_stream != nil {
-					_ = item.src_stream.Close()
-				}
-				return io.EOF
-			}
-			return nil
-		})
+		return walk_local_dir(local_path, false, s.url, yield)
 	}
 	if s.download_only {
 		file, err := os.Open(local_path)
@@ -130,6 +118,18 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item) bool) er
 		}))
 	}
 	return stream_items(filepath.Base(local_path), s.url, info.Size(), open_local_stream(local_path), yield)
+}
+
+func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item) bool) error {
+	if s.download_only {
+		return errors.New("download-only is not implemented for git sources")
+	}
+	work_dir, err := clone_git_repo(clone_url, ref)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work_dir)
+	return walk_local_dir(work_dir, true, clone_url, yield)
 }
 
 func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item) bool) error {
@@ -414,12 +414,82 @@ func local_fs_item(current_path string, rel_path string, src_url string) (hx_ite
 	return item, nil
 }
 
+func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield func(hx_item) bool) error {
+	return filepath.WalkDir(local_path, func(current_path string, entry os.DirEntry, walk_err error) error {
+		if walk_err != nil {
+			return walk_err
+		}
+		if current_path == local_path {
+			return nil
+		}
+		if skip_git_dir && entry.IsDir() && entry.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		rel_path, err := filepath.Rel(local_path, current_path)
+		if err != nil {
+			return err
+		}
+		item, err := local_fs_item(current_path, rel_path, src_url)
+		if err != nil {
+			return err
+		}
+		if !yield(item) {
+			if item.src_stream != nil {
+				_ = item.src_stream.Close()
+			}
+			return io.EOF
+		}
+		return nil
+	})
+}
+
 func open_local_stream(local_path string) io.ReadCloser {
 	file, err := os.Open(local_path)
 	if err != nil {
 		return error_read_closer{err: err}
 	}
 	return file
+}
+
+func clone_git_repo(clone_url string, ref string) (string, error) {
+	work_dir, err := os.MkdirTemp("", "hx-git-*")
+	if err != nil {
+		return "", err
+	}
+	_, err = git.PlainClone(work_dir, false, &git.CloneOptions{
+		URL:      clone_url,
+		Progress: io.Discard,
+	})
+	if err != nil {
+		os.RemoveAll(work_dir)
+		return "", err
+	}
+	if ref == "" {
+		return work_dir, nil
+	}
+	repo, err := git.PlainOpen(work_dir)
+	if err != nil {
+		os.RemoveAll(work_dir)
+		return "", err
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		os.RemoveAll(work_dir)
+		return "", err
+	}
+	checkout_opts := resolve_checkout_options(ref)
+	if err := worktree.Checkout(checkout_opts); err != nil {
+		os.RemoveAll(work_dir)
+		return "", err
+	}
+	return work_dir, nil
+}
+
+func resolve_checkout_options(ref string) *git.CheckoutOptions {
+	if is_hex_hash(ref) {
+		return &git.CheckoutOptions{Hash: plumbing.NewHash(ref)}
+	}
+	return &git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(ref)}
 }
 
 func stream_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item) bool) error {
@@ -617,6 +687,86 @@ func looks_like_windows_path(raw_value string) bool {
 	}
 	return (drive >= 'a' && drive <= 'z' || drive >= 'A' && drive <= 'Z') &&
 		(raw_value[2] == '\\' || raw_value[2] == '/')
+}
+
+func is_github_http_url(src_url *url.URL) bool {
+	if src_url == nil {
+		return false
+	}
+	if src_url.Scheme != "http" && src_url.Scheme != "https" {
+		return false
+	}
+	return strings.EqualFold(src_url.Hostname(), github_http_host())
+}
+
+func normalize_github_url(src_url *url.URL) *url.URL {
+	parts := split_clean_path(src_url.Path)
+	if len(parts) < 2 {
+		return src_url
+	}
+	owner := parts[0]
+	repo := strings.TrimSuffix(parts[1], ".git")
+	ref := ""
+	if len(parts) >= 4 && (parts[2] == "tree" || parts[2] == "commit") {
+		ref = strings.Join(parts[3:], "/")
+	}
+	github_url := &url.URL{
+		Scheme: "github",
+		Host:   src_url.Hostname(),
+		Path:   "/" + owner + "/" + repo,
+	}
+	if ref != "" {
+		query := url.Values{}
+		query.Set("ref", ref)
+		github_url.RawQuery = query.Encode()
+	}
+	return github_url
+}
+
+func github_clone_url(src_url *url.URL) string {
+	parts := split_clean_path(src_url.Path)
+	owner := parts[0]
+	repo := strings.TrimSuffix(parts[1], ".git")
+	base_url := strings.TrimRight(os.Getenv("HX_GITHUB_CLONE_BASE_URL"), "/")
+	if base_url != "" {
+		return base_url + "/" + owner + "/" + repo + ".git"
+	}
+	return "https://" + src_url.Host + "/" + owner + "/" + repo + ".git"
+}
+
+func github_http_host() string {
+	host := strings.TrimSpace(os.Getenv("HX_GITHUB_HTTP_HOST"))
+	if host == "" {
+		return "github.com"
+	}
+	return host
+}
+
+func split_clean_path(raw_path string) []string {
+	parts := strings.Split(strings.Trim(path.Clean(raw_path), "/"), "/")
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" && part != "." {
+			filtered = append(filtered, part)
+		}
+	}
+	return filtered
+}
+
+func is_hex_hash(raw_value string) bool {
+	if len(raw_value) != 40 {
+		return false
+	}
+	for _, c := range raw_value {
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if c >= 'a' && c <= 'f' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func stop_to_nil(keep_going bool) error {

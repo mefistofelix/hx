@@ -2,7 +2,7 @@
 
 `hx` is a CLI tool that copies, downloads, or extracts a source into a local folder.
 
-This first implementation round supports local paths, `file://` paths, plain HTTP(S) downloads, and archive extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
+This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, and GitHub repository URLs, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
 
 ## Usage
 
@@ -15,6 +15,8 @@ hx [flags] <source> [dest]
 - local files and directories
 - `file://` local paths
 - `http://` and `https://` file/archive URLs
+- `git://` repository URLs
+- GitHub repository URLs such as `https://github.com/owner/repo`, `/tree/<ref>`, and `/commit/<sha>`
 
 `dest` defaults to the current directory.
 
@@ -34,6 +36,7 @@ hx [flags] <source> [dest]
 - local directories are copied recursively
 - archives are extracted into `dest`
 - plain files are copied into `dest`
+- Git sources are cloned to a temporary worktree and copied without the `.git` directory
 - successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
 
 ## Examples
@@ -42,6 +45,8 @@ hx [flags] <source> [dest]
 hx ./sample.zip ./out
 hx ./folder ./out
 hx https://example.com/project.tar.gz ./out
+hx https://github.com/go-git/go-billy ./out
+hx https://github.com/go-git/go-billy/tree/master ./out
 hx -download-only https://example.com/file.zip ./downloads
 hx -strip 1 ./sample.tar.gz ./out
 ```

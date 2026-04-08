@@ -13,6 +13,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestLocalDirectoryCopy(t *testing.T) {
@@ -77,12 +82,41 @@ func TestHTTPArchiveAndSentinel(t *testing.T) {
 	}
 }
 
+func TestGitHubRepositoryExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	remote_base_dir := filepath.Join(root_dir, "remotes")
+	commit_hash := create_remote_repo(t, remote_base_dir, "acme", "demo")
+	dst_dir := filepath.Join(root_dir, "out")
+
+	run_hx_env(t, map[string]string{
+		"HX_GITHUB_CLONE_BASE_URL": "file:///" + filepath.ToSlash(remote_base_dir),
+	}, "https://github.com/acme/demo/commit/"+commit_hash, dst_dir)
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "pkg", "git.txt"))
+	must(t, err)
+	if string(data) != "git-data" {
+		t.Fatalf("unexpected git content: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(dst_dir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("expected .git to be skipped, err=%v", err)
+	}
+}
+
 func run_hx(t *testing.T, args ...string) string {
+	t.Helper()
+	return run_hx_env(t, nil, args...)
+}
+
+func run_hx_env(t *testing.T, extra_env map[string]string, args ...string) string {
 	t.Helper()
 	command_args := append([]string{"run", "../src", "-quiet"}, args...)
 	cmd := exec.Command("go", command_args...)
 	cmd.Dir = filepath.Join(project_root(t), "tests")
-	cmd.Env = append(os.Environ(), "GOCACHE="+filepath.Join(project_root(t), "tests_cache", "gocache"))
+	env := append(os.Environ(), "GOCACHE="+filepath.Join(project_root(t), "tests_cache", "gocache"))
+	for key, value := range extra_env {
+		env = append(env, key+"="+value)
+	}
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("hx failed: %v\n%s", err, output)
@@ -111,6 +145,40 @@ func tar_gz_bytes(t *testing.T, name string, body string) []byte {
 	must(t, tw.Close())
 	must(t, gzw.Close())
 	return buffer.Bytes()
+}
+
+func create_remote_repo(t *testing.T, remote_base_dir string, owner string, repo string) string {
+	t.Helper()
+	remote_repo_dir := filepath.Join(remote_base_dir, owner, repo+".git")
+	must(t, os.MkdirAll(filepath.Dir(remote_repo_dir), 0o755))
+	_, err := git.PlainInit(remote_repo_dir, true)
+	must(t, err)
+
+	work_dir := filepath.Join(t.TempDir(), "work")
+	work_repo, err := git.PlainInit(work_dir, false)
+	must(t, err)
+	must(t, os.MkdirAll(filepath.Join(work_dir, "pkg"), 0o755))
+	must(t, os.WriteFile(filepath.Join(work_dir, "pkg", "git.txt"), []byte("git-data"), 0o644))
+
+	worktree, err := work_repo.Worktree()
+	must(t, err)
+	_, err = worktree.Add("pkg/git.txt")
+	must(t, err)
+	commit_hash, err := worktree.Commit("initial", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "hx-tests",
+			Email: "hx-tests@example.invalid",
+			When:  time.Now(),
+		},
+	})
+	must(t, err)
+	_, err = work_repo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{remote_repo_dir},
+	})
+	must(t, err)
+	must(t, work_repo.Push(&git.PushOptions{RemoteName: "origin"}))
+	return commit_hash.String()
 }
 
 func must(t *testing.T, err error) {
