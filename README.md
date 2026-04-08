@@ -2,7 +2,7 @@
 
 `hx` is a CLI tool that copies, downloads, or extracts a source into a local folder.
 
-This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, and GitHub repository URLs, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
+This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, and `pypi://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
 
 ## Usage
 
@@ -18,6 +18,7 @@ hx [flags] <source> [dest]
 - `http://` and `https://` Git repository URLs ending in `.git`
 - `git://` repository URLs
 - GitHub repository URLs such as `https://github.com/owner/repo`, `/tree/<ref>`, and `/commit/<sha>`
+- `pypi://package` sources, with `-target` used as an optional version selector
 
 `dest` defaults to the current directory.
 
@@ -38,6 +39,7 @@ hx [flags] <source> [dest]
 - archives are extracted into `dest`
 - plain files are copied into `dest`
 - Git sources are cloned to a temporary worktree and copied without the `.git` directory
+- `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - if HTTPS certificate verification fails, `hx` warns and retries insecurely
 - successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
 
@@ -50,6 +52,7 @@ hx https://example.com/project.tar.gz ./out
 hx https://example.com/project.git ./out
 hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
+hx -registry https://pypi.org -target 2.32.3 pypi://requests ./out
 hx -download-only https://example.com/file.zip ./downloads
 hx -strip 1 ./sample.tar.gz ./out
 ```

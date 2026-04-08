@@ -98,6 +98,38 @@ func TestHTTPSArchiveInsecureFallback(t *testing.T) {
 	}
 }
 
+func TestPyPIExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+	archive_data := tar_gz_bytes(t, "demo-1.2.3/pkg/pypi.txt", "from-pypi")
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/pypi/demo/1.2.3/json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"urls":[{"url":"` + server.URL + `/packages/demo-1.2.3.tar.gz","filename":"demo-1.2.3.tar.gz","packagetype":"sdist"}]}`))
+		case "/packages/demo-1.2.3.tar.gz":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(archive_data)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := run_hx(t, "-registry", server.URL, "-target", "1.2.3", "pypi://demo", dst_dir)
+	if strings.Contains(output, "error:") {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "demo-1.2.3", "pkg", "pypi.txt"))
+	must(t, err)
+	if string(data) != "from-pypi" {
+		t.Fatalf("unexpected pypi content: %q", data)
+	}
+}
+
 func run_hx(t *testing.T, args ...string) string {
 	t.Helper()
 	command_args := append([]string{"run", "../src", "-quiet"}, args...)

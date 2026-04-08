@@ -132,6 +132,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_git(src_url.String(), src_url.Query().Get("ref"), yield)
 	case "github":
 		return s.items_from_git(github_clone_url(src_url), src_url.Query().Get("ref"), yield)
+	case "pypi":
+		return s.items_from_pypi(src_url, yield)
 	default:
 		return fmt.Errorf("unsupported source scheme: %s", src_url.Scheme)
 	}
@@ -236,6 +238,93 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item,
 	}
 	defer os.RemoveAll(work_dir)
 	return walk_local_dir(work_dir, true, clone_url, yield)
+}
+
+func (s hx_src) items_from_pypi(src_url *url.URL, yield func(hx_item, error) bool) error {
+	package_name := src_url.Host
+	if package_name == "" {
+		package_name = strings.Trim(path.Clean(src_url.Path), "/")
+	}
+	if package_name == "" || package_name == "." {
+		return errors.New("pypi source requires a package name")
+	}
+
+	version := strings.Trim(path.Clean(src_url.Path), "/")
+	if version == "." || version == package_name {
+		version = ""
+	}
+	if s.target != "" {
+		version = s.target
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = "https://pypi.org"
+	}
+
+	metadata_path := "/pypi/" + package_name + "/json"
+	if version != "" {
+		metadata_path = "/pypi/" + package_name + "/" + version + "/json"
+	}
+	metadata_url := registry_base_url + metadata_path
+	resp, insecure_retry, err := http_get(metadata_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("pypi metadata request failed: %s", resp.Status)
+	}
+
+	var payload struct {
+		URLs []struct {
+			URL         string `json:"url"`
+			Filename    string `json:"filename"`
+			PackageType string `json:"packagetype"`
+		} `json:"urls"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if len(payload.URLs) == 0 {
+		return errors.New("pypi metadata returned no files")
+	}
+
+	artifact_url := payload.URLs[0].URL
+	for _, file := range payload.URLs {
+		if file.PackageType == "sdist" {
+			artifact_url = file.URL
+			break
+		}
+	}
+
+	artifact_resp, insecure_retry, err := http_get(artifact_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
+		defer artifact_resp.Body.Close()
+		return fmt.Errorf("pypi download failed: %s", artifact_resp.Status)
+	}
+	if s.download_only {
+		yield(hx_item{
+			src_stream:      artifact_resp.Body,
+			type_name:       "file",
+			src_url:         artifact_url,
+			src_full_path:   path.Base(artifact_url),
+			size_compressed: artifact_resp.ContentLength,
+			size:            artifact_resp.ContentLength,
+		}, nil)
+		return nil
+	}
+
+	return stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield)
 }
 
 // -----------------------------------------------------------------------------
