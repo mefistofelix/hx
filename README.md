@@ -1,29 +1,14 @@
 # hx
 
-`hx` is a CLI tool that copies or downloads a source into a local folder with idempotent re-runs.
+`hx` is a CLI tool that downloads, extracts, or copies a source into a local folder in a single pass.
 
-This repository is currently in the first implementation stage driven by `CODE_DESIGN.md`.
+It supports local files, HTTP(S) URLs, Git repositories, container images, package registries, archives, compressed single files, and plain files.
 
-## Current scope
+## Install
 
-Implemented today:
+Download the binary for your platform from [Releases](../../releases) and put it on your `PATH`.
 
-- local file copy
-- local directory copy
-- `file://` sources
-- `http://` and `https://` single-file downloads
-- destination sentinel for skip-on-repeat behavior
-- basic include/exclude filtering
-- path prefix stripping
-- plain or ANSI progress output
-
-Not implemented yet:
-
-- archive extraction
-- Git and GitHub sources
-- package registries
-- container images
-- `download_only` behavior beyond raw file copy/download
+Or build from source with the included scripts.
 
 ## Usage
 
@@ -31,45 +16,119 @@ Not implemented yet:
 hx [flags] <source> [dest]
 ```
 
-Supported `source` values in the current stage:
+`source` can be:
 
-- local path like `./file.txt` or `./dir`
-- `file:///path/to/file.txt`
-- `https://example.com/file.txt`
+- a local path such as `./file.zip`, `../dir/archive.tgz`, `/opt/archive.tgz`, or `file:///opt/archive.tgz`
+- an HTTP or HTTPS URL
+- a Git repository URL
+- a `docker://` image reference
+- a `nuget://`, `winget://`, `pypi://`, `npm://`, `apt://`, `rpm://`, or `apk://` source
 
-`dest` defaults to the current directory.
+`dest` is optional. If omitted, the current directory is used.
 
-## Flags
+Flags must be placed before `source`.
+
+## Common flags
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-strip N`, `-skip N` | `0` | Skip `N` leading path components before writing to destination |
-| `-symlinks 0|1` | `1` | Disable symlink materialization from local directory sources with `0` |
-| `-incexc RULES` | empty | Ordered `+pattern` and `-pattern` path rules |
-| `-quiet 0|1`, `-q 0|1` | `0` | Use plain output instead of ANSI progress updates |
-| `-overwrite 0|1` | `1` | Overwrite destination files when present |
-| `-platform`, `-plat`, `-registry`, `-reg`, `-target`, `-t`, `-download-only`, `-do`, `-notmp`, `-no-tempfile` | parsed | Reserved and persisted already for future source implementations |
+| `-strip N`, `-skip N` | `0` | Strip `N` leading path components from extracted entries |
+| `-symlinks 0|1` | `1` | Enable or disable symlink extraction when supported |
+| `-download-only 0|1`, `-do 0|1` | `0` | Download the source without extracting it |
+| `-notmp 0|1`, `-no-tempfile 0|1` | `0` | Avoid temp-file fallback for ZIP downloads from non-range HTTP servers |
+| `-platform OS/ARCH[/VARIANT]`, `-plat ...` | host-specific | Select the target platform for sources that use it |
+| `-registry VALUE`, `-reg VALUE` | auto | Override the registry or repository base for supported source types |
+| `-target VALUE`, `-t VALUE` | auto | Select a repository-specific target such as distro release or framework |
+| `-incexc RULES` | `:+` | Include or exclude extracted paths with ordered `+` and `-` rules |
+| `-quiet 0|1`, `-q 0|1` | `0` | Prefer plain CI-friendly output |
 
-## Build
+## Examples
 
-The build scripts bootstrap a local Go toolchain into `build_cache/` and write binaries to `bin/`.
+```sh
+# Extract a remote archive into ./out
+hx https://example.com/repo.tar.gz ./out
+
+# Extract a local archive and strip the top-level folder
+hx -strip 1 ./downloads/repo.zip ./out
+
+# Decompress a single gzip file
+hx https://example.com/file.txt.gz ./out
+
+# Download without extracting
+hx -do 1 https://example.com/repo.tar.gz ./out
+
+# Download a GitHub repository
+hx https://github.com/go-git/go-billy ./out
+
+# Extract a container image filesystem
+hx docker://busybox:latest ./out
+
+# Extract a NuGet package
+hx nuget://Newtonsoft.Json ./out
+
+# Extract a PyPI package
+hx pypi://requests ./out
+
+# Extract an npm package
+hx npm://lodash ./out
+
+# Extract an APT package with dependencies
+hx apt://curl ./out
+```
+
+## Idempotency
+
+After a successful extraction or download, `hx` writes a sentinel file in the destination.
+
+If the same source is requested again with the same material options, `hx` skips the operation and exits successfully.
+
+The cache key depends on the source identity and relevant options such as destination, `-strip`, `-symlinks`, `-download-only`, `-platform`, `-registry`, `-target`, and `-incexc` when they affect the output.
+
+## Supported formats
+
+- archives: `.tar`, `.tar.gz`, `.zip`, `.7z`, `.rar`, `.deb`, `.rpm`, `.cpio`, and other formats supported through [mholt/archives](https://github.com/mholt/archives)
+- compressed single files: `.br`, `.bz2`, `.gz`, `.lz`, `.lz4`, `.mz`, `.s2`, `.sz`, `.xz`, `.zz`, `.zst`
+- Git repositories via [go-git](https://github.com/go-git/go-git)
+- Docker and OCI images fetched directly from the registry API
+- NuGet, WinGet, PyPI, npm, APT, RPM, and Alpine APK package sources
+
+Format detection is automatic. If the source is not recognized as an archive or compressed payload, `hx` copies it into `dest` as a plain file.
+
+## Notes
+
+- local files are read directly from disk
+- GitHub repository URLs are accepted directly as Git sources
+- `docker://` sources do not require Docker or Podman
+- with `-download-only`, package and image sources are downloaded without unpacking or applying layers
+- when `-incexc` is used, rules are evaluated relative to the destination root after path stripping
+- for HTTPS sources, if certificate verification fails, `hx` warns and retries insecurely
+
+## Building
+
+The included scripts bootstrap the Go toolchain automatically. No preinstalled Go is required.
 
 ```sh
 # Windows
-powershell -ExecutionPolicy Bypass -File build/build.ps1
+build.bat
 
 # Linux / macOS
-chmod +x build/build.sh && build/build.sh
+chmod +x build.sh && ./build.sh
 ```
 
-## Test
+Build outputs are written to `bin/`.
 
-Test entrypoints live in `tests/`, while Go package tests stay next to `src/main.go`.
+## Testing
+
+Use the platform-native test script:
 
 ```sh
 # Windows
-powershell -ExecutionPolicy Bypass -File tests/test.ps1
+test.ps1
 
 # Linux / macOS
-chmod +x tests/test.sh && tests/test.sh
+chmod +x test.sh && ./test.sh
 ```
+
+## License
+
+MIT
