@@ -35,7 +35,7 @@ hx [flags] <source> [dest]
 | --- | --- | --- |
 | `-strip N`, `-skip N` | `0` | Strip `N` leading path components from extracted entries |
 | `-symlinks 0|1` | `1` | Preserve symlinks when the source provides them and the platform supports them |
-| `-download-only 0|1`, `-do 0|1` | `0` | Download or copy the source as a single file without extraction |
+| `-download-only 0|1`, `-do 0|1` | `0` | Download or copy the source artifact without extraction; package and image sources may emit multiple files |
 | `-notmp 0|1`, `-no-tempfile 0|1` | `0` | Refuse the temp-file fallback used for HTTP ZIP extraction |
 | `-platform OS/ARCH[/VARIANT]`, `-plat ...` | host-specific | Select the target platform for sources that use it |
 | `-registry VALUE`, `-reg VALUE` | auto | Override the registry or repository base for supported source types |
@@ -50,7 +50,7 @@ hx [flags] <source> [dest]
 - additional archive/compression formats such as `.7z`, `.rar`, `.xz`, `.bz2`, `.zst`, `.lz4`, `.br`, and related single-file compressed variants are handled through `mholt/archives`
 - plain files are copied into `dest`
 - Git sources are cloned to a temporary worktree and copied without the `.git` directory
-- `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`
+- `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`; with `-download-only`, it writes the manifest plus config/layer blobs instead
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
 - `winget://` resolves package manifests from the public `winget-pkgs` repository, selects a matching installer for the requested architecture, then downloads or extracts that installer artifact

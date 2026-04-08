@@ -168,6 +168,22 @@ func TestDockerExtraction(t *testing.T) {
 	}
 }
 
+func TestDockerDownloadOnly(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+
+	run_hx(t, "-download-only", "1", "-platform", "linux/amd64", "docker://busybox:1.36.1", dst_dir)
+
+	if _, err := os.Stat(filepath.Join(dst_dir, "manifest.json")); err != nil {
+		t.Fatalf("expected manifest.json, err=%v", err)
+	}
+	layer_files, err := filepath.Glob(filepath.Join(dst_dir, "sha256-*.tar*"))
+	must(t, err)
+	if len(layer_files) == 0 {
+		t.Fatalf("expected docker layer blobs")
+	}
+}
+
 func TestAPKExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
@@ -219,7 +235,22 @@ func TestRPMExtraction(t *testing.T) {
 func run_hx(t *testing.T, args ...string) string {
 	t.Helper()
 	command_args := append([]string{"run", "../src", "-quiet"}, args...)
-	cmd := exec.Command("go", command_args...)
+	go_exe := os.Getenv("HX_GO_EXE")
+	if go_exe == "" {
+		for _, candidate := range []string{
+			filepath.Join(project_root(t), "build_cache", "go_sdk", "bin", "go.exe"),
+			filepath.Join(project_root(t), "build_cache", "go", "bin", "go"),
+		} {
+			if _, err := os.Stat(candidate); err == nil {
+				go_exe = candidate
+				break
+			}
+		}
+	}
+	if go_exe == "" {
+		go_exe = "go"
+	}
+	cmd := exec.Command(go_exe, command_args...)
 	cmd.Dir = filepath.Join(project_root(t), "tests")
 	cmd.Env = append(os.Environ(), "GOCACHE="+filepath.Join(project_root(t), "tests_cache", "gocache"))
 	output, err := cmd.CombinedOutput()

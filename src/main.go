@@ -763,7 +763,46 @@ func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) b
 		return err
 	}
 	if s.download_only {
-		return errors.New("download-only is not implemented for docker sources")
+		manifest_data, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return err
+		}
+		yield(hx_item{
+			src_stream:    io.NopCloser(bytes.NewReader(manifest_data)),
+			type_name:     "file",
+			src_url:       src_url.String(),
+			src_full_path: "manifest.json",
+			size:          int64(len(manifest_data)),
+		}, nil)
+
+		if manifest.Config.Digest != "" {
+			config_url := registry_base_url + "/v2/" + image_name + "/blobs/" + manifest.Config.Digest
+			config_body, _, err := http_get_with_headers(config_url, nil)
+			if err != nil {
+				return err
+			}
+			yield(hx_item{
+				src_stream:    config_body,
+				type_name:     "file",
+				src_url:       config_url,
+				src_full_path: docker_blob_name(manifest.Config.Digest, ".json"),
+			}, nil)
+		}
+
+		for _, layer := range manifest.Layers {
+			layer_url := registry_base_url + "/v2/" + image_name + "/blobs/" + layer.Digest
+			layer_body, _, err := http_get_with_headers(layer_url, nil)
+			if err != nil {
+				return err
+			}
+			yield(hx_item{
+				src_stream:    layer_body,
+				type_name:     "file",
+				src_url:       layer_url,
+				src_full_path: docker_blob_name(layer.Digest, docker_layer_suffix(layer.MediaType)),
+			}, nil)
+		}
+		return nil
 	}
 
 	work_dir, err := os.MkdirTemp("", "hx-docker-*")
@@ -2269,6 +2308,25 @@ func fetch_docker_manifest(registry_base_url string, image_name string, image_re
 		}
 	}
 	return fetch_docker_manifest(registry_base_url, image_name, selected_digest, platform_name)
+}
+
+func docker_blob_name(digest string, suffix string) string {
+	blob_name := strings.NewReplacer(":", "-", "/", "-").Replace(strings.TrimSpace(digest))
+	if blob_name == "" {
+		blob_name = default_download
+	}
+	return blob_name + suffix
+}
+
+func docker_layer_suffix(media_type string) string {
+	switch {
+	case strings.Contains(media_type, "zstd"):
+		return ".tar.zst"
+	case strings.Contains(media_type, "gzip"):
+		return ".tar.gz"
+	default:
+		return ".tar"
+	}
 }
 
 func apply_docker_layer(root_dir string, registry_base_url string, image_name string, layer struct {

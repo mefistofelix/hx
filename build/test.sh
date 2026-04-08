@@ -6,5 +6,4 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 go_tool="$(command -v go || printf '%s\n' "$root_dir/build_cache/go/bin/go")"
 mkdir -p "$root_dir/tests_cache/gocache"
-GOCACHE="$root_dir/tests_cache/gocache" "$go_tool" test ./tests/...
-
+GOCACHE="$root_dir/tests_cache/gocache" HX_GO_EXE="$go_tool" "$go_tool" test ./tests/...

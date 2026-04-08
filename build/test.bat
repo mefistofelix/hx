@@ -16,5 +16,6 @@ if not exist "%GO_EXE%" (
 :run_tests
 if not exist "%ROOT_DIR%\tests_cache\gocache" mkdir "%ROOT_DIR%\tests_cache\gocache"
 set "GOCACHE=%ROOT_DIR%\tests_cache\gocache"
+set "HX_GO_EXE=%GO_EXE%"
 "%GO_EXE%" test ./tests/...
 exit /b %ERRORLEVEL%
