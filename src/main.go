@@ -241,17 +241,14 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item,
 }
 
 func (s hx_src) items_from_pypi(src_url *url.URL, yield func(hx_item, error) bool) error {
-	pypi_source := strings.TrimPrefix(s.url, "pypi://")
-	pypi_source = strings.Trim(strings.TrimSpace(pypi_source), "/")
-	if pypi_source == "" {
-		return errors.New("pypi source requires a package name")
-	}
-
-	package_name := pypi_source
+	package_name := src_url.Host
 	version := ""
-	if at_index := strings.LastIndex(pypi_source, "@"); at_index > 0 && at_index < len(pypi_source)-1 {
-		package_name = pypi_source[:at_index]
-		version = pypi_source[at_index+1:]
+	if src_url.User != nil {
+		package_name = src_url.User.Username()
+		version = src_url.Host
+	}
+	if package_name == "" || package_name == "." {
+		return errors.New("pypi source requires a package name")
 	}
 
 	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
