@@ -18,7 +18,9 @@
 
 - At the end of each prompt-round commit changes in the current branch if something goes wrong notify the XDev
 
-- Whenever final user facing behavior change is made, always update `README.md` to reflect it in a simple systehetized non redundant way in the best section available or create a new section
+- DESIDERATA.md if foundamental and repesents more or less verbosely the destination/finel feature set we want to implement in the project/code, this file can change in the project developement, but you should never touch it only XDev wil eventually update id to inform you about a new desiderata, you must check the logical not raw diffrences between DESIDERATA.md and README.md to discover what needs to be implemented, beforse starting to implementn something however always ask XDev for confirmation
+
+- Whenever final user facing behavior change is made, always update `README.md` to reflect it in a simple systehetized non redundant way in the best section available or create a new section, README.md reflects and documents for the final user the current features implemented in the project at the current stage of development
 
 - whenever a feature or code change it's significative keep the test suite updated
 
@@ -46,4 +48,4 @@
 
 - build and tests subsystems will save cache/ephemeral data respectively to build_cache and tests_cache
 
-- never ever change delete or modify agents.md claude.md code_style.md or code_design.md
+- never ever change delete or modify agents.md claude.md code_style.md or code_design.md desiderata.md
