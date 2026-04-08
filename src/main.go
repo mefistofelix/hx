@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"crypto/tls"
@@ -73,6 +74,7 @@ var (
 	tar_gz_suffixes      = []string{".tar.gz", ".tgz"}
 	tar_suffix           = ".tar"
 	gzip_suffix          = ".gz"
+	apk_suffix           = ".apk"
 	zip_suffixes         = []string{".zip", ".nupkg"}
 	git_suffix           = ".git"
 	github_host          = "github.com"
@@ -140,6 +142,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_npm(src_url, yield)
 	case "docker":
 		return s.items_from_docker(src_url, yield)
+	case "apk":
+		return s.items_from_apk(src_url, yield)
 	default:
 		return fmt.Errorf("unsupported source scheme: %s", src_url.Scheme)
 	}
@@ -525,6 +529,108 @@ func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) b
 	return walk_local_dir(work_dir, false, src_url.String(), yield)
 }
 
+func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool) error {
+	package_name := src_url.Host
+	version := ""
+	if src_url.User != nil {
+		package_name = src_url.User.Username()
+		version = src_url.Host
+	}
+	if package_name == "" || package_name == "." {
+		return errors.New("apk source requires a package name")
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = "https://dl-cdn.alpinelinux.org/alpine"
+	}
+	repo_target := strings.Trim(strings.TrimSpace(s.target), "/")
+	if repo_target == "" {
+		repo_target = "edge/main"
+	}
+	platform_arch := split_platform_name(s.platform)[1]
+	if platform_arch == "" {
+		platform_arch = runtime.GOARCH
+	}
+	switch platform_arch {
+	case "amd64":
+		platform_arch = "x86_64"
+	case "arm64":
+		platform_arch = "aarch64"
+	}
+
+	index_url := registry_base_url + "/" + repo_target + "/" + platform_arch + "/APKINDEX.tar.gz"
+	resp, insecure_retry, err := http_get(index_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("apk index request failed: %s", resp.Status)
+	}
+
+	index_data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	index_text, err := apkindex_text(index_data)
+	if err != nil {
+		return err
+	}
+
+	selected_version := ""
+	for _, block := range strings.Split(index_text, "\n\n") {
+		fields := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(block), "\n") {
+			if len(line) < 3 || line[1] != ':' {
+				continue
+			}
+			fields[line[:1]] = line[2:]
+		}
+		if fields["P"] != package_name {
+			continue
+		}
+		if version != "" && fields["V"] != version {
+			continue
+		}
+		selected_version = fields["V"]
+		break
+	}
+	if selected_version == "" {
+		return errors.New("apk index returned no matching package")
+	}
+
+	artifact_name := package_name + "-" + selected_version + ".apk"
+	artifact_url := registry_base_url + "/" + repo_target + "/" + platform_arch + "/" + artifact_name
+	artifact_resp, insecure_retry, err := http_get(artifact_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
+		defer artifact_resp.Body.Close()
+		return fmt.Errorf("apk download failed: %s", artifact_resp.Status)
+	}
+	if s.download_only {
+		yield(hx_item{
+			src_stream:      artifact_resp.Body,
+			type_name:       "file",
+			src_url:         artifact_url,
+			src_full_path:   artifact_name,
+			size_compressed: artifact_resp.ContentLength,
+			size:            artifact_resp.ContentLength,
+		}, nil)
+		return nil
+	}
+
+	return stream_items(artifact_name, artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield)
+}
+
 // -----------------------------------------------------------------------------
 // Destination flow
 // -----------------------------------------------------------------------------
@@ -826,7 +932,9 @@ func clone_git_repo(clone_url string, ref string) (string, error) {
 func stream_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item, error) bool) error {
 	lower_name := strings.ToLower(name)
 	switch {
-	case strings.HasSuffix(lower_name, tar_gz_suffixes[0]), strings.HasSuffix(lower_name, tar_gz_suffixes[1]):
+	case strings.HasSuffix(lower_name, tar_gz_suffixes[0]),
+		strings.HasSuffix(lower_name, tar_gz_suffixes[1]),
+		strings.HasSuffix(lower_name, apk_suffix):
 		defer src_stream.Close()
 		gz_reader, err := gzip.NewReader(src_stream)
 		if err != nil {
@@ -1003,6 +1111,32 @@ func download_name(src_url *url.URL) string {
 		return default_download
 	}
 	return name
+}
+
+func apkindex_text(index_data []byte) (string, error) {
+	gz_reader, err := gzip.NewReader(bytes.NewReader(index_data))
+	if err != nil {
+		return "", err
+	}
+	defer gz_reader.Close()
+	tar_reader := tar.NewReader(gz_reader)
+	for {
+		header, err := tar_reader.Next()
+		if errors.Is(err, io.EOF) {
+			return "", errors.New("apk index archive has no APKINDEX")
+		}
+		if err != nil {
+			return "", err
+		}
+		if path.Base(header.Name) != "APKINDEX" {
+			continue
+		}
+		body, err := io.ReadAll(tar_reader)
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+	}
 }
 
 // -----------------------------------------------------------------------------

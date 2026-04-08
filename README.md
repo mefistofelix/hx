@@ -2,7 +2,7 @@
 
 `hx` is a CLI tool that copies, downloads, or extracts a source into a local folder.
 
-This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `docker://` image sources, `pypi://` package sources, `nuget://` package sources, and `npm://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
+This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `docker://` image sources, `pypi://` package sources, `nuget://` package sources, `npm://` package sources, and `apk://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.apk`, and single-file `.gz`.
 
 ## Usage
 
@@ -22,6 +22,7 @@ hx [flags] <source> [dest]
 - `pypi://package` and `pypi://package@version` sources
 - `nuget://package` and `nuget://package@version` sources
 - `npm://package` and `npm://package@version` sources for non-scoped packages
+- `apk://package` and `apk://package@version` sources
 
 `dest` defaults to the current directory.
 
@@ -46,6 +47,7 @@ hx [flags] <source> [dest]
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
 - `npm://` resolves the package metadata and extracts or downloads the published tarball for the selected version
+- `apk://` fetches `APKINDEX.tar.gz`, resolves the selected package for the requested repo and arch, then extracts or downloads the `.apk` artifact
 - if HTTPS certificate verification fails, `hx` warns and retries insecurely
 - successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
 
@@ -62,6 +64,7 @@ hx docker://busybox:latest ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out
 hx -registry https://registry.npmjs.org npm://lodash@4.17.21 ./out
+hx -registry https://dl-cdn.alpinelinux.org/alpine -platform linux/amd64 apk://busybox@1.36.1-r2 ./out
 hx -download-only https://example.com/file.zip ./downloads
 hx -strip 1 ./sample.tar.gz ./out
 ```

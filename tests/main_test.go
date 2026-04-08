@@ -198,6 +198,39 @@ func TestNPMExtraction(t *testing.T) {
 	}
 }
 
+func TestAPKExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+	index_data := tar_gz_bytes(t, "APKINDEX", "P:busybox\nV:1.36.1-r2\n\n")
+	apk_data := tar_gz_bytes(t, "sbin/busybox", "from-apk")
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/edge/main/x86_64/APKINDEX.tar.gz":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(index_data)
+		case "/edge/main/x86_64/busybox-1.36.1-r2.apk":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(apk_data)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := run_hx(t, "-registry", server.URL, "-platform", "linux/amd64", "apk://busybox@1.36.1-r2", dst_dir)
+	if strings.Contains(output, "error:") {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "sbin", "busybox"))
+	must(t, err)
+	if string(data) != "from-apk" {
+		t.Fatalf("unexpected apk content: %q", data)
+	}
+}
+
 func TestDockerExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
