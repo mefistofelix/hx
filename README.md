@@ -48,8 +48,8 @@ hx [flags] <source> [dest]
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
 - `npm://` resolves the package metadata and extracts or downloads the published tarball for the selected version
-- `apt://` fetches `Packages.gz`, resolves the selected package for the requested distribution target and arch, then extracts or downloads the `.deb` artifact
-- `apk://` fetches `APKINDEX.tar.gz`, resolves the selected package for the requested repo and arch, then extracts or downloads the `.apk` artifact
+- `apt://` fetches `Packages.gz`, resolves the selected package plus `Depends` and `Pre-Depends` for the requested distribution target and arch, then extracts or downloads the `.deb` artifacts
+- `apk://` fetches `APKINDEX.tar.gz`, resolves the selected package plus dependency providers for the requested repo and arch, then extracts or downloads the `.apk` artifacts
 - if HTTPS certificate verification fails, `hx` warns and retries insecurely
 - successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
 
@@ -66,8 +66,8 @@ hx docker://busybox:latest ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out
 hx -registry https://registry.npmjs.org npm://lodash@4.17.21 ./out
-hx -registry https://deb.debian.org/debian -target bookworm/main -platform linux/amd64 apt://hello ./out
-hx -registry https://dl-cdn.alpinelinux.org/alpine -platform linux/amd64 apk://busybox@1.36.1-r2 ./out
+hx -registry https://deb.debian.org/debian -target bookworm/main -platform linux/amd64 apt://curl ./out
+hx -registry https://dl-cdn.alpinelinux.org/alpine -target v3.22/main -platform linux/amd64 apk://curl ./out
 hx -download-only https://example.com/file.zip ./downloads
 hx -strip 1 ./sample.tar.gz ./out
 ```

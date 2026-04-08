@@ -88,10 +88,15 @@ func TestAPKExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
 
-	run_hx(t, "-target", "edge/main", "-platform", "linux/amd64", "apk://busybox", dst_dir)
+	run_hx(t, "-target", "v3.22/main", "-platform", "linux/amd64", "apk://curl", dst_dir)
 
-	if _, err := os.Stat(filepath.Join(dst_dir, "bin", "busybox")); err != nil {
-		t.Fatalf("expected busybox binary, err=%v", err)
+	if _, err := os.Stat(filepath.Join(dst_dir, "usr", "bin", "curl")); err != nil {
+		t.Fatalf("expected curl binary, err=%v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dst_dir, "usr", "lib", "libcurl.so.4*"))
+	must(t, err)
+	if len(matches) == 0 {
+		t.Fatalf("expected libcurl dependency files")
 	}
 }
 
@@ -99,10 +104,15 @@ func TestAPTExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
 
-	run_hx(t, "-registry", "https://deb.debian.org/debian", "-target", "bookworm/main", "-platform", "linux/amd64", "apt://hello", dst_dir)
+	run_hx(t, "-registry", "https://deb.debian.org/debian", "-target", "bookworm/main", "-platform", "linux/amd64", "apt://curl", dst_dir)
 
-	if _, err := os.Stat(filepath.Join(dst_dir, "usr", "bin", "hello")); err != nil {
-		t.Fatalf("expected hello binary, err=%v", err)
+	if _, err := os.Stat(filepath.Join(dst_dir, "usr", "bin", "curl")); err != nil {
+		t.Fatalf("expected curl binary, err=%v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dst_dir, "usr", "lib", "x86_64-linux-gnu", "libcurl.so.4*"))
+	must(t, err)
+	if len(matches) == 0 {
+		t.Fatalf("expected libcurl dependency files")
 	}
 }
 

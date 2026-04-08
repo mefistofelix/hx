@@ -89,6 +89,7 @@ var (
 	apt_default_target   = "stable/main"
 	hex_hash_rx          = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	tls_error_rx         = regexp.MustCompile(`(?i)(x509:|certificate|tls:)`)
+	apt_dep_name_rx      = regexp.MustCompile(`[a-z0-9][a-z0-9+.-]*`)
 )
 
 // -----------------------------------------------------------------------------
@@ -588,8 +589,8 @@ func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item, error) bool
 		return err
 	}
 
-	selected_filename := ""
 	trimmed_index := strings.ReplaceAll(string(index_data), "\r\n", "\n")
+	apt_packages := map[string][]map[string]string{}
 	for _, block := range strings.Split(trimmed_index, "\n\n") {
 		fields := map[string]string{}
 		last_key := ""
@@ -610,46 +611,100 @@ func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item, error) bool
 			fields[pair[0]] = pair[1]
 			last_key = pair[0]
 		}
-		if fields["Package"] != package_name {
-			continue
+		if fields["Package"] != "" && fields["Filename"] != "" {
+			apt_packages[fields["Package"]] = append(apt_packages[fields["Package"]], fields)
 		}
-		if version != "" && fields["Version"] != version {
-			continue
-		}
-		selected_filename = fields["Filename"]
-		if selected_filename != "" {
-			break
-		}
-	}
-	if selected_filename == "" {
-		return errors.New("apt index returned no matching package")
 	}
 
-	artifact_url := registry_base_url + "/" + strings.TrimPrefix(selected_filename, "/")
-	artifact_resp, insecure_retry, err := http_get(artifact_url)
-	if err != nil {
-		return err
-	}
-	if insecure_retry {
-		fmt.Fprintln(os.Stderr, tls_retry_message)
-	}
-	if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
-		defer artifact_resp.Body.Close()
-		return fmt.Errorf("apt download failed: %s", artifact_resp.Status)
-	}
-	if s.download_only {
-		yield(hx_item{
-			src_stream:      artifact_resp.Body,
-			type_name:       "file",
-			src_url:         artifact_url,
-			src_full_path:   path.Base(artifact_url),
-			size_compressed: artifact_resp.ContentLength,
-			size:            artifact_resp.ContentLength,
-		}, nil)
+	resolved_packages := map[string]map[string]string{}
+	resolving_packages := map[string]bool{}
+	resolved_order := make([]map[string]string, 0)
+
+	var resolve_package func(string, string) error
+	resolve_package = func(current_package string, requested_version string) error {
+		if resolved_packages[current_package] != nil {
+			if requested_version == "" || resolved_packages[current_package]["Version"] == requested_version {
+				return nil
+			}
+		}
+		if resolving_packages[current_package] {
+			return nil
+		}
+
+		selected_package := map[string]string(nil)
+		for _, candidate := range apt_packages[current_package] {
+			if requested_version != "" && candidate["Version"] != requested_version {
+				continue
+			}
+			selected_package = candidate
+			break
+		}
+		if selected_package == nil {
+			return fmt.Errorf("apt index returned no matching package: %s", current_package)
+		}
+
+		resolving_packages[current_package] = true
+		for _, dep_group_list := range []string{selected_package["Pre-Depends"], selected_package["Depends"]} {
+			for _, dep_group := range strings.Split(dep_group_list, ",") {
+				dependency_name := ""
+				for _, dep_alternative := range strings.Split(dep_group, "|") {
+					dependency_match := apt_dep_name_rx.FindString(strings.ToLower(dep_alternative))
+					if dependency_match == "" {
+						continue
+					}
+					if len(apt_packages[dependency_match]) == 0 {
+						continue
+					}
+					dependency_name = dependency_match
+					break
+				}
+				if dependency_name == "" {
+					continue
+				}
+				if err := resolve_package(dependency_name, ""); err != nil {
+					return err
+				}
+			}
+		}
+		resolving_packages[current_package] = false
+		resolved_packages[current_package] = selected_package
+		resolved_order = append(resolved_order, selected_package)
 		return nil
 	}
 
-	return stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield)
+	if err := resolve_package(package_name, version); err != nil {
+		return err
+	}
+
+	for _, resolved_package := range resolved_order {
+		artifact_url := registry_base_url + "/" + strings.TrimPrefix(resolved_package["Filename"], "/")
+		artifact_resp, insecure_retry, err := http_get(artifact_url)
+		if err != nil {
+			return err
+		}
+		if insecure_retry {
+			fmt.Fprintln(os.Stderr, tls_retry_message)
+		}
+		if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
+			defer artifact_resp.Body.Close()
+			return fmt.Errorf("apt download failed: %s", artifact_resp.Status)
+		}
+		if s.download_only {
+			yield(hx_item{
+				src_stream:      artifact_resp.Body,
+				type_name:       "file",
+				src_url:         artifact_url,
+				src_full_path:   path.Base(artifact_url),
+				size_compressed: artifact_resp.ContentLength,
+				size:            artifact_resp.ContentLength,
+			}, nil)
+			continue
+		}
+		if err := stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool) error {
@@ -704,7 +759,8 @@ func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool
 		return err
 	}
 
-	selected_version := ""
+	apk_packages := map[string]map[string]string{}
+	apk_providers := map[string]string{}
 	for _, block := range strings.Split(index_text, "\n\n") {
 		fields := map[string]string{}
 		for _, line := range strings.Split(strings.TrimSpace(block), "\n") {
@@ -713,45 +769,113 @@ func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool
 			}
 			fields[line[:1]] = line[2:]
 		}
-		if fields["P"] != package_name {
+		if fields["P"] == "" || fields["V"] == "" {
 			continue
 		}
-		if version != "" && fields["V"] != version {
-			continue
+		apk_packages[fields["P"]] = fields
+		apk_providers[fields["P"]] = fields["P"]
+		for _, provider := range strings.Fields(fields["p"]) {
+			provider_name := strings.TrimSpace(provider)
+			if provider_name == "" {
+				continue
+			}
+			provider_name = strings.FieldsFunc(provider_name, func(r rune) bool {
+				return r == '=' || r == '<' || r == '>' || r == '~'
+			})[0]
+			if provider_name != "" && apk_providers[provider_name] == "" {
+				apk_providers[provider_name] = fields["P"]
+			}
 		}
-		selected_version = fields["V"]
-		break
-	}
-	if selected_version == "" {
-		return errors.New("apk index returned no matching package")
 	}
 
-	artifact_name := package_name + "-" + selected_version + ".apk"
-	artifact_url := registry_base_url + "/" + repo_target + "/" + platform_arch + "/" + artifact_name
-	artifact_resp, insecure_retry, err := http_get(artifact_url)
-	if err != nil {
-		return err
-	}
-	if insecure_retry {
-		fmt.Fprintln(os.Stderr, tls_retry_message)
-	}
-	if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
-		defer artifact_resp.Body.Close()
-		return fmt.Errorf("apk download failed: %s", artifact_resp.Status)
-	}
-	if s.download_only {
-		yield(hx_item{
-			src_stream:      artifact_resp.Body,
-			type_name:       "file",
-			src_url:         artifact_url,
-			src_full_path:   artifact_name,
-			size_compressed: artifact_resp.ContentLength,
-			size:            artifact_resp.ContentLength,
-		}, nil)
+	resolved_packages := map[string]map[string]string{}
+	resolving_packages := map[string]bool{}
+	resolved_order := make([]map[string]string, 0)
+
+	var resolve_package func(string, string) error
+	resolve_package = func(current_package string, requested_version string) error {
+		if resolved_packages[current_package] != nil {
+			if requested_version == "" || resolved_packages[current_package]["V"] == requested_version {
+				return nil
+			}
+		}
+		if resolving_packages[current_package] {
+			return nil
+		}
+
+		selected_package := apk_packages[current_package]
+		if selected_package == nil {
+			return fmt.Errorf("apk index returned no matching package: %s", current_package)
+		}
+		if requested_version != "" && selected_package["V"] != requested_version {
+			return fmt.Errorf("apk index returned no matching package version: %s@%s", current_package, requested_version)
+		}
+
+		resolving_packages[current_package] = true
+		for _, dep_token := range strings.Fields(selected_package["D"]) {
+			if strings.HasPrefix(dep_token, "!") {
+				continue
+			}
+			dependency_name := strings.FieldsFunc(dep_token, func(r rune) bool {
+				return r == '=' || r == '<' || r == '>' || r == '~'
+			})
+			if len(dependency_name) == 0 || dependency_name[0] == "" {
+				continue
+			}
+			dependency_key := dependency_name[0]
+			if dependency_key == "" {
+				continue
+			}
+			if apk_providers[dependency_key] != "" {
+				dependency_key = apk_providers[dependency_key]
+			}
+			if apk_packages[dependency_key] == nil {
+				continue
+			}
+			if err := resolve_package(dependency_key, ""); err != nil {
+				return err
+			}
+		}
+		resolving_packages[current_package] = false
+		resolved_packages[current_package] = selected_package
+		resolved_order = append(resolved_order, selected_package)
 		return nil
 	}
 
-	return stream_items(artifact_name, artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield)
+	if err := resolve_package(package_name, version); err != nil {
+		return err
+	}
+
+	for _, resolved_package := range resolved_order {
+		artifact_name := resolved_package["P"] + "-" + resolved_package["V"] + ".apk"
+		artifact_url := registry_base_url + "/" + repo_target + "/" + platform_arch + "/" + artifact_name
+		artifact_resp, insecure_retry, err := http_get(artifact_url)
+		if err != nil {
+			return err
+		}
+		if insecure_retry {
+			fmt.Fprintln(os.Stderr, tls_retry_message)
+		}
+		if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
+			defer artifact_resp.Body.Close()
+			return fmt.Errorf("apk download failed: %s", artifact_resp.Status)
+		}
+		if s.download_only {
+			yield(hx_item{
+				src_stream:      artifact_resp.Body,
+				type_name:       "file",
+				src_url:         artifact_url,
+				src_full_path:   artifact_name,
+				size_compressed: artifact_resp.ContentLength,
+				size:            artifact_resp.ContentLength,
+			}, nil)
+			continue
+		}
+		if err := stream_items(artifact_name, artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // -----------------------------------------------------------------------------
