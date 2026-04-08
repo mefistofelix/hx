@@ -58,4 +58,4 @@
 
 - install and handle gh commands to update/commit/create/push/handle workflows/delete repos/create repos/change repo descriptions etc, obtain a gh token with the required security scopes once or if something goes wrong by prompting to XDev the url and the code to allow the gh token to be initialized
 
-- if the current developement env is windows and you need to execute or test something in a linux env use windows wsl
+- if the current developement env is windows and you need to execute or test something in a linux env use windows wsl ubuntu, eventually install the wsl subsystem and distro if missing, also use the root flag in wsl to enter the subsystem to install packages etc, you can always switch to a non root user from root using su
