@@ -31,6 +31,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	rpmutils "github.com/sassoftware/go-rpmutils"
 	"github.com/ulikunitz/xz"
+	"gopkg.in/yaml.v3"
 )
 
 // -----------------------------------------------------------------------------
@@ -92,6 +93,7 @@ var (
 	apt_default_target   = "stable/main"
 	rpm_default_registry = "https://download.fedoraproject.org/pub/fedora/linux/releases"
 	rpm_default_target   = "41/Everything"
+	winget_default_api   = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests"
 	hex_hash_rx          = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	tls_error_rx         = regexp.MustCompile(`(?i)(x509:|certificate|tls:)`)
 	apt_dep_name_rx      = regexp.MustCompile(`[a-z0-9][a-z0-9+.-]*`)
@@ -151,6 +153,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_nuget(src_url, yield)
 	case "npm":
 		return s.items_from_npm(src_url, yield)
+	case "winget":
+		return s.items_from_winget(src_url, yield)
 	case "docker":
 		return s.items_from_docker(src_url, yield)
 	case "apt":
@@ -493,6 +497,187 @@ func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item, error) bool
 	}
 
 	return stream_items(path.Base(tarball_url), tarball_url, tarball_resp.ContentLength, tarball_resp.Body, yield)
+}
+
+func (s hx_src) items_from_winget(src_url *url.URL, yield func(hx_item, error) bool) error {
+	package_id := src_url.Host
+	version := ""
+	if src_url.User != nil {
+		package_id = src_url.User.Username()
+		version = src_url.Host
+	}
+	if package_id == "" || package_id == "." {
+		return errors.New("winget source requires a package identifier")
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = winget_default_api
+	}
+
+	package_parts := strings.Split(package_id, ".")
+	if len(package_parts) < 2 || package_parts[0] == "" {
+		return errors.New("winget source requires an identifier like Publisher.Package")
+	}
+	manifest_dir := "/" + strings.ToLower(package_parts[0][:1]) + "/" + strings.Join(package_parts, "/")
+
+	type github_content struct {
+		Name        string `json:"name"`
+		Path        string `json:"path"`
+		Type        string `json:"type"`
+		DownloadURL string `json:"download_url"`
+	}
+
+	if version == "" {
+		body, _, err := http_get_with_headers(registry_base_url+manifest_dir, map[string]string{"User-Agent": "hx"})
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		entries := []github_content{}
+		if err := json.NewDecoder(body).Decode(&entries); err != nil {
+			return err
+		}
+		best_version := ""
+		best_version_key := ""
+		for _, entry := range entries {
+			if entry.Type != "dir" || entry.Name == "" {
+				continue
+			}
+			current_key := ""
+			for _, token := range strings.FieldsFunc(strings.ToLower(entry.Name), func(r rune) bool {
+				return (r < '0' || r > '9') && (r < 'a' || r > 'z')
+			}) {
+				if token == "" {
+					continue
+				}
+				if current_key != "" {
+					current_key += "\x00"
+				}
+				if token[0] >= '0' && token[0] <= '9' {
+					current_key += fmt.Sprintf("%08s", token)
+				} else {
+					current_key += token
+				}
+			}
+			if current_key > best_version_key {
+				best_version = entry.Name
+				best_version_key = current_key
+			}
+		}
+		if best_version == "" {
+			return errors.New("winget metadata returned no versions")
+		}
+		version = best_version
+	}
+
+	body, _, err := http_get_with_headers(registry_base_url+manifest_dir+"/"+version, map[string]string{"User-Agent": "hx"})
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+
+	entries := []github_content{}
+	if err := json.NewDecoder(body).Decode(&entries); err != nil {
+		return err
+	}
+
+	installer_manifest_url := ""
+	for _, entry := range entries {
+		if entry.Type != "file" || !strings.HasSuffix(strings.ToLower(entry.Name), ".yaml") {
+			continue
+		}
+		lower_name := strings.ToLower(entry.Name)
+		if strings.Contains(lower_name, ".installer.") || strings.HasSuffix(lower_name, ".installer.yaml") {
+			installer_manifest_url = entry.DownloadURL
+			break
+		}
+		if installer_manifest_url == "" {
+			installer_manifest_url = entry.DownloadURL
+		}
+	}
+	if installer_manifest_url == "" {
+		return errors.New("winget metadata returned no installer manifest")
+	}
+
+	manifest_resp, insecure_retry, err := http_get(installer_manifest_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	defer manifest_resp.Body.Close()
+	if manifest_resp.StatusCode < 200 || manifest_resp.StatusCode > 299 {
+		return fmt.Errorf("winget manifest request failed: %s", manifest_resp.Status)
+	}
+
+	var manifest struct {
+		PackageVersion string `yaml:"PackageVersion"`
+		Installers     []struct {
+			Architecture string `yaml:"Architecture"`
+			InstallerURL string `yaml:"InstallerUrl"`
+		} `yaml:"Installers"`
+	}
+	if err := yaml.NewDecoder(manifest_resp.Body).Decode(&manifest); err != nil {
+		return err
+	}
+	if len(manifest.Installers) == 0 {
+		return errors.New("winget installer manifest returned no installers")
+	}
+
+	selected_arch := split_platform_name(s.platform)[1]
+	switch selected_arch {
+	case "", "amd64":
+		selected_arch = "x64"
+	case "386":
+		selected_arch = "x86"
+	case "arm64":
+		selected_arch = "arm64"
+	}
+
+	installer_url := ""
+	for _, installer := range manifest.Installers {
+		if installer.InstallerURL == "" {
+			continue
+		}
+		if installer.Architecture == "" || strings.EqualFold(installer.Architecture, selected_arch) {
+			installer_url = installer.InstallerURL
+			break
+		}
+	}
+	if installer_url == "" {
+		installer_url = manifest.Installers[0].InstallerURL
+	}
+	if installer_url == "" {
+		return errors.New("winget installer manifest returned no installer url")
+	}
+
+	installer_resp, insecure_retry, err := http_get(installer_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	if installer_resp.StatusCode < 200 || installer_resp.StatusCode > 299 {
+		defer installer_resp.Body.Close()
+		return fmt.Errorf("winget download failed: %s", installer_resp.Status)
+	}
+	if s.download_only {
+		yield(hx_item{
+			src_stream:      installer_resp.Body,
+			type_name:       "file",
+			src_url:         installer_url,
+			src_full_path:   path.Base(strings.Split(installer_url, "?")[0]),
+			size_compressed: installer_resp.ContentLength,
+			size:            installer_resp.ContentLength,
+		}, nil)
+		return nil
+	}
+
+	return stream_items(path.Base(strings.Split(installer_url, "?")[0]), installer_url, installer_resp.ContentLength, installer_resp.Body, yield)
 }
 
 func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) bool) error {

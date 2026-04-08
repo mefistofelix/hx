@@ -2,7 +2,7 @@
 
 `hx` is a CLI tool that copies, downloads, or extracts a source into a local folder.
 
-This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `docker://` image sources, `pypi://` package sources, `nuget://` package sources, `npm://` package sources, `apt://` package sources, `rpm://` package sources, and `apk://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.deb`, `.rpm`, `.apk`, and single-file `.gz`.
+This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `docker://` image sources, `pypi://` package sources, `nuget://` package sources, `winget://` package sources, `npm://` package sources, `apt://` package sources, `rpm://` package sources, and `apk://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.deb`, `.rpm`, `.apk`, and single-file `.gz`.
 
 ## Usage
 
@@ -21,6 +21,7 @@ hx [flags] <source> [dest]
 - `docker://image[:tag]` image sources
 - `pypi://package` and `pypi://package@version` sources
 - `nuget://package` and `nuget://package@version` sources
+- `winget://Package.Identifier` and `winget://Package.Identifier@version` sources
 - `npm://package` and `npm://package@version` sources for non-scoped packages
 - `apt://package` and `apt://package@version` sources
 - `rpm://package` and `rpm://package@version` sources
@@ -48,6 +49,7 @@ hx [flags] <source> [dest]
 - `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
+- `winget://` resolves package manifests from the public `winget-pkgs` repository, selects a matching installer for the requested architecture, then downloads or extracts that installer artifact
 - `npm://` resolves the package metadata and extracts or downloads the published tarball for the selected version
 - `apt://` fetches `Packages.gz`, resolves the selected package plus `Depends` and `Pre-Depends` for the requested distribution target and arch, then extracts or downloads the `.deb` artifacts
 - `rpm://` fetches `repomd.xml` plus `primary.xml.gz`, resolves the selected package plus matching providers for `Requires`, then extracts or downloads the `.rpm` artifacts
@@ -67,6 +69,7 @@ hx https://github.com/go-git/go-billy/tree/master ./out
 hx docker://busybox:latest ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out
+hx winget://Git.Git@2.46.0 ./out
 hx -registry https://registry.npmjs.org npm://lodash@4.17.21 ./out
 hx -registry https://deb.debian.org/debian -target bookworm/main -platform linux/amd64 apt://curl ./out
 hx -registry https://download.fedoraproject.org/pub/fedora/linux/releases -target 41/Everything -platform linux/amd64 rpm://jq ./out

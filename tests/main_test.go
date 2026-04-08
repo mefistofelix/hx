@@ -62,6 +62,19 @@ func TestNuGetExtraction(t *testing.T) {
 	}
 }
 
+func TestWinGetExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+
+	run_hx(t, "-platform", "windows/amd64", "winget://Git.Git@2.46.0", dst_dir)
+
+	matches, err := filepath.Glob(filepath.Join(dst_dir, "Git-*-64-bit.exe"))
+	must(t, err)
+	if len(matches) == 0 {
+		t.Fatalf("expected Git for Windows installer")
+	}
+}
+
 func TestNPMExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
