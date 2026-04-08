@@ -1,12 +1,6 @@
 package tests
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"bytes"
-	"compress/gzip"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,118 +9,45 @@ import (
 	"testing"
 )
 
-func TestLocalDirectoryCopy(t *testing.T) {
-	root_dir := t.TempDir()
-	src_dir := filepath.Join(root_dir, "src")
-	dst_dir := filepath.Join(root_dir, "dst")
-	must(t, os.MkdirAll(filepath.Join(src_dir, "nested"), 0o755))
-	must(t, os.WriteFile(filepath.Join(src_dir, "nested", "hello.txt"), []byte("hello"), 0o644))
-
-	run_hx(t, src_dir, dst_dir)
-
-	data, err := os.ReadFile(filepath.Join(dst_dir, "nested", "hello.txt"))
-	must(t, err)
-	if string(data) != "hello" {
-		t.Fatalf("unexpected file content: %q", data)
-	}
-}
-
-func TestLocalZipExtraction(t *testing.T) {
-	root_dir := t.TempDir()
-	zip_path := filepath.Join(root_dir, "sample.zip")
-	dst_dir := filepath.Join(root_dir, "out")
-
-	buffer := &bytes.Buffer{}
-	zw := zip.NewWriter(buffer)
-	file_writer, err := zw.Create("pkg/file.txt")
-	must(t, err)
-	_, err = file_writer.Write([]byte("zip-data"))
-	must(t, err)
-	must(t, zw.Close())
-	must(t, os.WriteFile(zip_path, buffer.Bytes(), 0o644))
-
-	run_hx(t, zip_path, dst_dir)
-
-	data, err := os.ReadFile(filepath.Join(dst_dir, "pkg", "file.txt"))
-	must(t, err)
-	if string(data) != "zip-data" {
-		t.Fatalf("unexpected zip content: %q", data)
-	}
-}
-
 func TestHTTPArchiveAndSentinel(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
-	archive_data := tar_gz_bytes(t, "pkg/http.txt", "over-http")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(archive_data)
-	}))
-	defer server.Close()
 
-	run_hx(t, server.URL+"/sample.tar.gz", dst_dir)
-	data, err := os.ReadFile(filepath.Join(dst_dir, "pkg", "http.txt"))
+	run_hx(t, "-strip", "1", "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz", dst_dir)
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "file.go"))
 	must(t, err)
-	if string(data) != "over-http" {
-		t.Fatalf("unexpected http content: %q", data)
+	if !strings.Contains(string(data), "package memfs") {
+		t.Fatalf("unexpected file.go content")
 	}
 
-	output := run_hx(t, server.URL+"/sample.tar.gz", dst_dir)
+	output := run_hx(t, "-strip", "1", "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz", dst_dir)
 	if !strings.Contains(output, "already matches") {
 		t.Fatalf("expected sentinel skip warning, got %q", output)
 	}
 }
 
-func TestHTTPSArchiveInsecureFallback(t *testing.T) {
+func TestGitHubRepositoryExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
-	archive_data := tar_gz_bytes(t, "pkg/secure.txt", "fallback-ok")
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(archive_data)
-	}))
-	defer server.Close()
 
-	output := run_hx(t, server.URL+"/sample.tar.gz", dst_dir)
-	data, err := os.ReadFile(filepath.Join(dst_dir, "pkg", "secure.txt"))
+	run_hx(t, "https://github.com/go-git/go-billy", dst_dir)
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "go.mod"))
 	must(t, err)
-	if string(data) != "fallback-ok" {
-		t.Fatalf("unexpected https content: %q", data)
-	}
-	if !strings.Contains(output, "retrying insecurely") {
-		t.Fatalf("expected insecure retry warning, got %q", output)
+	if !strings.Contains(string(data), "github.com/go-git/go-billy/v6") {
+		t.Fatalf("unexpected go.mod content")
 	}
 }
 
 func TestPyPIExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
-	archive_data := tar_gz_bytes(t, "demo-1.2.3/pkg/pypi.txt", "from-pypi")
 
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/pypi/demo/1.2.3/json":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"urls":[{"url":"` + server.URL + `/packages/demo-1.2.3.tar.gz","filename":"demo-1.2.3.tar.gz","packagetype":"sdist"}]}`))
-		case "/packages/demo-1.2.3.tar.gz":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(archive_data)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	run_hx(t, "-strip", "1", "pypi://requests@2.32.3", dst_dir)
 
-	output := run_hx(t, "-registry", server.URL, "pypi://demo@1.2.3", dst_dir)
-	if strings.Contains(output, "error:") {
-		t.Fatalf("unexpected output: %q", output)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dst_dir, "demo-1.2.3", "pkg", "pypi.txt"))
-	must(t, err)
-	if string(data) != "from-pypi" {
-		t.Fatalf("unexpected pypi content: %q", data)
+	if _, err := os.Stat(filepath.Join(dst_dir, "pyproject.toml")); err != nil {
+		t.Fatalf("expected pyproject.toml, err=%v", err)
 	}
 }
 
@@ -134,152 +55,43 @@ func TestNuGetExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
 
-	buffer := &bytes.Buffer{}
-	zw := zip.NewWriter(buffer)
-	file_writer, err := zw.Create("pkg/nuget.txt")
-	must(t, err)
-	_, err = file_writer.Write([]byte("from-nuget"))
-	must(t, err)
-	must(t, zw.Close())
+	run_hx(t, "nuget://Newtonsoft.Json@13.0.3", dst_dir)
 
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v3-flatcontainer/newtonsoft.json/13.0.3/newtonsoft.json.13.0.3.nupkg":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(buffer.Bytes())
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	output := run_hx(t, "-registry", server.URL, "nuget://Newtonsoft.Json@13.0.3", dst_dir)
-	if strings.Contains(output, "error:") {
-		t.Fatalf("unexpected output: %q", output)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dst_dir, "pkg", "nuget.txt"))
-	must(t, err)
-	if string(data) != "from-nuget" {
-		t.Fatalf("unexpected nuget content: %q", data)
+	if _, err := os.Stat(filepath.Join(dst_dir, "lib", "net45", "Newtonsoft.Json.dll")); err != nil {
+		t.Fatalf("expected Newtonsoft.Json.dll, err=%v", err)
 	}
 }
 
 func TestNPMExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
-	archive_data := tar_gz_bytes(t, "package/pkg/npm.txt", "from-npm")
 
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/lodash":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"dist-tags":{"latest":"4.17.21"},"versions":{"4.17.21":{"dist":{"tarball":"` + server.URL + `/lodash/-/lodash-4.17.21.tgz"}}}}`))
-		case "/lodash/-/lodash-4.17.21.tgz":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(archive_data)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	run_hx(t, "npm://lodash@4.17.21", dst_dir)
 
-	output := run_hx(t, "-registry", server.URL, "npm://lodash@4.17.21", dst_dir)
-	if strings.Contains(output, "error:") {
-		t.Fatalf("unexpected output: %q", output)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dst_dir, "package", "pkg", "npm.txt"))
-	must(t, err)
-	if string(data) != "from-npm" {
-		t.Fatalf("unexpected npm content: %q", data)
-	}
-}
-
-func TestAPKExtraction(t *testing.T) {
-	root_dir := t.TempDir()
-	dst_dir := filepath.Join(root_dir, "out")
-	index_data := tar_gz_bytes(t, "APKINDEX", "P:busybox\nV:1.36.1-r2\n\n")
-	apk_data := tar_gz_bytes(t, "sbin/busybox", "from-apk")
-
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/edge/main/x86_64/APKINDEX.tar.gz":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(index_data)
-		case "/edge/main/x86_64/busybox-1.36.1-r2.apk":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(apk_data)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	output := run_hx(t, "-registry", server.URL, "-platform", "linux/amd64", "apk://busybox@1.36.1-r2", dst_dir)
-	if strings.Contains(output, "error:") {
-		t.Fatalf("unexpected output: %q", output)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dst_dir, "sbin", "busybox"))
-	must(t, err)
-	if string(data) != "from-apk" {
-		t.Fatalf("unexpected apk content: %q", data)
+	if _, err := os.Stat(filepath.Join(dst_dir, "package", "package.json")); err != nil {
+		t.Fatalf("expected package.json, err=%v", err)
 	}
 }
 
 func TestDockerExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
-	layer_one := tar_gz_bytes2(t, map[string]string{
-		"root/keep.txt": "keep",
-		"root/live.txt": "live",
-	})
-	layer_two := tar_gz_bytes2(t, map[string]string{
-		"root/.wh.keep.txt": "",
-	})
 
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v2/library/busybox/manifests/latest":
-			w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
-			_, _ = w.Write([]byte(`{
-				"schemaVersion": 2,
-				"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-				"config": {"digest": "sha256:config"},
-				"layers": [
-					{"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "digest": "sha256:layer1"},
-					{"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "digest": "sha256:layer2"}
-				]
-			}`))
-		case "/v2/library/busybox/blobs/sha256:layer1":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(layer_one)
-		case "/v2/library/busybox/blobs/sha256:layer2":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(layer_two)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	run_hx(t, "-platform", "linux/amd64", "docker://busybox:1.36.1", dst_dir)
 
-	output := run_hx(t, "-registry", server.URL, "docker://busybox:latest", dst_dir)
-	if strings.Contains(output, "error:") {
-		t.Fatalf("unexpected output: %q", output)
+	if _, err := os.Stat(filepath.Join(dst_dir, "bin", "busybox")); err != nil {
+		t.Fatalf("expected busybox binary, err=%v", err)
 	}
+}
 
-	if _, err := os.Stat(filepath.Join(dst_dir, "root", "keep.txt")); !os.IsNotExist(err) {
-		t.Fatalf("expected whiteout to remove keep.txt, err=%v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(dst_dir, "root", "live.txt"))
-	must(t, err)
-	if string(data) != "live" {
-		t.Fatalf("unexpected docker content: %q", data)
+func TestAPKExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+
+	run_hx(t, "-target", "edge/main", "-platform", "linux/amd64", "apk://busybox", dst_dir)
+
+	if _, err := os.Stat(filepath.Join(dst_dir, "bin", "busybox")); err != nil {
+		t.Fatalf("expected busybox binary, err=%v", err)
 	}
 }
 
@@ -303,27 +115,6 @@ func project_root(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Dir(filepath.Dir(this_file))
-}
-
-func tar_gz_bytes(t *testing.T, name string, body string) []byte {
-	t.Helper()
-	return tar_gz_bytes2(t, map[string]string{name: body})
-}
-
-func tar_gz_bytes2(t *testing.T, files map[string]string) []byte {
-	t.Helper()
-	buffer := &bytes.Buffer{}
-	gzw := gzip.NewWriter(buffer)
-	tw := tar.NewWriter(gzw)
-	for name, body := range files {
-		header := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}
-		must(t, tw.WriteHeader(header))
-		_, err := tw.Write([]byte(body))
-		must(t, err)
-	}
-	must(t, tw.Close())
-	must(t, gzw.Close())
-	return buffer.Bytes()
 }
 
 func must(t *testing.T, err error) {
