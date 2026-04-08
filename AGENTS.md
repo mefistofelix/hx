@@ -12,6 +12,10 @@
 
 ## All the following rules are important regardless the order of apparence
 
+- if not initiliazed init git
+
+- initialize and update accordinly to other rules and in a meaningful way a gitignore file for this project
+
 - At the end of each prompt-round commit changes in the current branch if something goes wrong notify the XDev
 
 - Whenever final user facing behavior change is made, always update `README.md` to reflect it in a simple systehetized non redundant way in the best section available or create a new section
@@ -39,3 +43,7 @@
 - dont proliferate source files use only the main source file until specified otherwise in CODE_DESIGN.md
 
 - keep an updated test suite the tests subdirectory in project root
+
+- build and tests subsystems will save cache/ephemeral data respectively to build_cache and tests_cache
+
+- never ever change delete or modify agents.md claude.md code_style.md or code_design.md
