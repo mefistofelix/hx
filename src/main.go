@@ -150,15 +150,20 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item, error) b
 		if err != nil {
 			return err
 		}
-		return stop_to_nil(yield(hx_item{
+		yield(hx_item{
 			src_stream:    file,
 			type_name:     "file",
 			src_url:       s.url,
 			src_full_path: filepath.Base(local_path),
 			size:          info.Size(),
-		}, nil))
+		}, nil)
+		return nil
 	}
-	return stream_items(filepath.Base(local_path), s.url, info.Size(), open_local_stream(local_path), yield)
+	file, err := os.Open(local_path)
+	if err != nil {
+		return err
+	}
+	return stream_items(filepath.Base(local_path), s.url, info.Size(), file, yield)
 }
 
 func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) bool) error {
@@ -171,22 +176,23 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) boo
 			return err
 		}
 		if insecure_retry {
-			warn_tls_retry()
+			fmt.Fprintln(os.Stderr, tls_retry_message)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			defer resp.Body.Close()
 			return fmt.Errorf("download failed: %s", resp.Status)
 		}
-		return stop_to_nil(yield(hx_item{
+		yield(hx_item{
 			src_stream:      resp.Body,
 			type_name:       "file",
 			src_url:         src_url.String(),
 			src_full_path:   download_name(src_url),
 			size_compressed: resp.ContentLength,
 			size:            resp.ContentLength,
-		}, nil))
+		}, nil)
+		return nil
 	}
-	if looks_like_zip(src_url.Path) {
+	if strings.HasSuffix(strings.ToLower(src_url.Path), zip_suffix) {
 		if s.force_no_tmp {
 			return errors.New("zip over http requires temp file unless -notmp 0")
 		}
@@ -199,7 +205,11 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) boo
 		if err != nil {
 			return err
 		}
-		return stream_items(filepath.Base(src_url.Path), src_url.String(), info.Size(), open_local_stream(tmp_path), yield)
+		file, err := os.Open(tmp_path)
+		if err != nil {
+			return err
+		}
+		return stream_items(filepath.Base(src_url.Path), src_url.String(), info.Size(), file, yield)
 	}
 
 	resp, insecure_retry, err := http_get(src_url.String())
@@ -207,7 +217,7 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) boo
 		return err
 	}
 	if insecure_retry {
-		warn_tls_retry()
+		fmt.Fprintln(os.Stderr, tls_retry_message)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		defer resp.Body.Close()
@@ -480,14 +490,6 @@ func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield 
 	})
 }
 
-func open_local_stream(local_path string) io.ReadCloser {
-	file, err := os.Open(local_path)
-	if err != nil {
-		return error_read_closer{err: err}
-	}
-	return file
-}
-
 // clone_git_repo materializes the repo once so the rest of the pipeline stays path-based.
 func clone_git_repo(clone_url string, ref string) (string, error) {
 	work_dir, err := os.MkdirTemp("", "hx-git-*")
@@ -515,18 +517,15 @@ func clone_git_repo(clone_url string, ref string) (string, error) {
 		os.RemoveAll(work_dir)
 		return "", err
 	}
-	if err := worktree.Checkout(resolve_checkout_options(ref)); err != nil {
+	checkout_opts := &git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(ref)}
+	if hex_hash_rx.MatchString(ref) {
+		checkout_opts = &git.CheckoutOptions{Hash: plumbing.NewHash(ref)}
+	}
+	if err := worktree.Checkout(checkout_opts); err != nil {
 		os.RemoveAll(work_dir)
 		return "", err
 	}
 	return work_dir, nil
-}
-
-func resolve_checkout_options(ref string) *git.CheckoutOptions {
-	if is_hex_hash(ref) {
-		return &git.CheckoutOptions{Hash: plumbing.NewHash(ref)}
-	}
-	return &git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(ref)}
 }
 
 // -----------------------------------------------------------------------------
@@ -536,7 +535,7 @@ func resolve_checkout_options(ref string) *git.CheckoutOptions {
 func stream_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item, error) bool) error {
 	lower_name := strings.ToLower(name)
 	switch {
-	case looks_like_tar_gz(lower_name):
+	case strings.HasSuffix(lower_name, tar_gz_suffixes[0]), strings.HasSuffix(lower_name, tar_gz_suffixes[1]):
 		defer src_stream.Close()
 		gz_reader, err := gzip.NewReader(src_stream)
 		if err != nil {
@@ -547,21 +546,24 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 	case strings.HasSuffix(lower_name, tar_suffix):
 		defer src_stream.Close()
 		return tar_items(tar.NewReader(src_stream), src_url, yield)
-	case looks_like_gzip(lower_name):
+	case strings.HasSuffix(lower_name, gzip_suffix) &&
+		!strings.HasSuffix(lower_name, tar_gz_suffixes[0]) &&
+		!strings.HasSuffix(lower_name, tar_gz_suffixes[1]):
 		defer src_stream.Close()
 		gz_reader, err := gzip.NewReader(src_stream)
 		if err != nil {
 			return err
 		}
 		defer gz_reader.Close()
-		return stop_to_nil(yield(hx_item{
+		yield(hx_item{
 			src_stream:      io.NopCloser(gz_reader),
 			type_name:       "file",
 			src_url:         src_url,
 			src_full_path:   strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)),
 			size_compressed: src_size,
-		}, nil))
-	case looks_like_zip(lower_name):
+		}, nil)
+		return nil
+	case strings.HasSuffix(lower_name, zip_suffix):
 		defer src_stream.Close()
 		tmp_file, err := os.CreateTemp("", "hx-local-zip-*.zip")
 		if err != nil {
@@ -577,14 +579,15 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 		defer os.Remove(tmp_path)
 		return zip_items(tmp_path, src_url, yield)
 	default:
-		return stop_to_nil(yield(hx_item{
+		yield(hx_item{
 			src_stream:      src_stream,
 			type_name:       "file",
 			src_url:         src_url,
 			src_full_path:   filepath.Base(name),
 			size_compressed: src_size,
 			size:            src_size,
-		}, nil))
+		}, nil)
+		return nil
 	}
 }
 
@@ -677,7 +680,7 @@ func download_to_temp(src_url string) (string, error) {
 		return "", err
 	}
 	if insecure_retry {
-		warn_tls_retry()
+		fmt.Fprintln(os.Stderr, tls_retry_message)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -716,36 +719,20 @@ func parse_src_url(raw_value string) (*url.URL, string) {
 		return &url.URL{}, raw_value
 	}
 	if parsed.Scheme == "file" {
-		return parsed, file_url_path(parsed)
+		if parsed.Host == "" {
+			file_path := filepath.FromSlash(parsed.Path)
+			if len(file_path) >= 3 && (file_path[0] == '\\' || file_path[0] == '/') && file_path[2] == ':' {
+				return parsed, file_path[1:]
+			}
+			return parsed, file_path
+		}
+		return parsed, filepath.FromSlash("//" + parsed.Host + parsed.Path)
 	}
 	return parsed, raw_value
 }
 
-func file_url_path(parsed *url.URL) string {
-	if parsed.Host == "" {
-		file_path := filepath.FromSlash(parsed.Path)
-		if len(file_path) >= 3 && (file_path[0] == '\\' || file_path[0] == '/') && file_path[2] == ':' {
-			return file_path[1:]
-		}
-		return file_path
-	}
-	return filepath.FromSlash("//" + parsed.Host + parsed.Path)
-}
-
 func normalize_rel_path(raw_path string) string {
 	return strings.TrimPrefix(filepath.ToSlash(filepath.Clean(raw_path)), "./")
-}
-
-func looks_like_tar_gz(name string) bool {
-	return has_any_suffix(name, tar_gz_suffixes)
-}
-
-func looks_like_gzip(name string) bool {
-	return strings.HasSuffix(name, gzip_suffix) && !looks_like_tar_gz(name)
-}
-
-func looks_like_zip(name string) bool {
-	return strings.HasSuffix(name, zip_suffix)
 }
 
 func looks_like_http_git_url(src_url *url.URL) bool {
@@ -770,7 +757,7 @@ func is_github_http_url(src_url *url.URL) bool {
 	if src_url.Scheme != "http" && src_url.Scheme != "https" {
 		return false
 	}
-	return strings.EqualFold(src_url.Hostname(), github_http_host())
+	return strings.EqualFold(src_url.Hostname(), github_host)
 }
 
 func normalize_github_url(src_url *url.URL) *url.URL {
@@ -808,10 +795,6 @@ func github_clone_url(src_url *url.URL) string {
 	}).String()
 }
 
-func github_http_host() string {
-	return github_host
-}
-
 func split_clean_path(raw_path string) []string {
 	parts := strings.Split(strings.Trim(path.Clean(raw_path), "/"), "/")
 	filtered := make([]string, 0, len(parts))
@@ -821,10 +804,6 @@ func split_clean_path(raw_path string) []string {
 		}
 	}
 	return filtered
-}
-
-func is_hex_hash(raw_value string) bool {
-	return hex_hash_rx.MatchString(raw_value)
 }
 
 func http_get(src_url string) (*http.Response, bool, error) {
@@ -849,38 +828,6 @@ func http_get(src_url string) (*http.Response, bool, error) {
 
 func looks_like_tls_verify_error(err error) bool {
 	return tls_error_rx.MatchString(err.Error())
-}
-
-func warn_tls_retry() {
-	fmt.Fprintln(os.Stderr, tls_retry_message)
-}
-
-func has_any_suffix(raw_value string, suffixes []string) bool {
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(raw_value, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-func stop_to_nil(keep_going bool) error {
-	if keep_going {
-		return nil
-	}
-	return nil
-}
-
-type error_read_closer struct {
-	err error
-}
-
-func (e error_read_closer) Read(_ []byte) (int, error) {
-	return 0, e.err
-}
-
-func (e error_read_closer) Close() error {
-	return nil
 }
 
 // -----------------------------------------------------------------------------
