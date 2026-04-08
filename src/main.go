@@ -138,6 +138,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_nuget(src_url, yield)
 	case "npm":
 		return s.items_from_npm(src_url, yield)
+	case "docker":
+		return s.items_from_docker(src_url, yield)
 	default:
 		return fmt.Errorf("unsupported source scheme: %s", src_url.Scheme)
 	}
@@ -472,6 +474,55 @@ func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item, error) bool
 	}
 
 	return stream_items(path.Base(tarball_url), tarball_url, tarball_resp.ContentLength, tarball_resp.Body, yield)
+}
+
+func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) bool) error {
+	image_name := strings.Trim(strings.TrimSpace(src_url.Opaque), "/")
+	if image_name == "" {
+		image_name = strings.Trim(strings.TrimSpace(src_url.Host+src_url.Path), "/")
+	}
+	if image_name == "" {
+		return errors.New("docker source requires an image reference")
+	}
+
+	image_tag := "latest"
+	if at := strings.LastIndex(image_name, "@"); at > 0 && at < len(image_name)-1 {
+		image_tag = image_name[at+1:]
+		image_name = image_name[:at]
+	} else if colon := strings.LastIndex(image_name, ":"); colon > strings.LastIndex(image_name, "/") {
+		image_tag = image_name[colon+1:]
+		image_name = image_name[:colon]
+	}
+	if !strings.Contains(image_name, "/") {
+		image_name = "library/" + image_name
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = "https://registry-1.docker.io"
+	}
+
+	manifest, err := fetch_docker_manifest(registry_base_url, image_name, image_tag, s.platform)
+	if err != nil {
+		return err
+	}
+	if s.download_only {
+		return errors.New("download-only is not implemented for docker sources")
+	}
+
+	work_dir, err := os.MkdirTemp("", "hx-docker-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work_dir)
+
+	for _, layer := range manifest.Layers {
+		if err := apply_docker_layer(work_dir, registry_base_url, image_name, layer); err != nil {
+			return err
+		}
+	}
+
+	return walk_local_dir(work_dir, false, src_url.String(), yield)
 }
 
 // -----------------------------------------------------------------------------
@@ -966,7 +1017,16 @@ func parse_src_url(raw_value string) (*url.URL, string) {
 		return &url.URL{}, raw_value
 	}
 	parsed, err := url.Parse(raw_value)
-	if err != nil || parsed.Scheme == "" {
+	if err != nil {
+		if strings.HasPrefix(raw_value, "docker://") {
+			return &url.URL{
+				Scheme: "docker",
+				Opaque: strings.TrimPrefix(raw_value, "docker://"),
+			}, raw_value
+		}
+		return &url.URL{}, raw_value
+	}
+	if parsed.Scheme == "" {
 		return &url.URL{}, raw_value
 	}
 	if parsed.Scheme == "file" {
@@ -1056,6 +1116,243 @@ func split_clean_path(raw_path string) []string {
 		}
 	}
 	return filtered
+}
+
+type docker_manifest struct {
+	SchemaVersion int `json:"schemaVersion"`
+	MediaType     string
+	Config        struct {
+		Digest string `json:"digest"`
+	} `json:"config"`
+	Layers []struct {
+		MediaType string `json:"mediaType"`
+		Digest    string `json:"digest"`
+	} `json:"layers"`
+	Manifests []struct {
+		MediaType string `json:"mediaType"`
+		Digest    string `json:"digest"`
+		Platform  struct {
+			OS           string `json:"os"`
+			Architecture string `json:"architecture"`
+			Variant      string `json:"variant"`
+		} `json:"platform"`
+	} `json:"manifests"`
+}
+
+func fetch_docker_manifest(registry_base_url string, image_name string, image_ref string, platform_name string) (docker_manifest, error) {
+	manifest_url := registry_base_url + "/v2/" + image_name + "/manifests/" + image_ref
+	accept_types := strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", ")
+	body, _, err := http_get_with_headers(manifest_url, map[string]string{"Accept": accept_types})
+	if err != nil {
+		return docker_manifest{}, err
+	}
+	defer body.Close()
+
+	var manifest docker_manifest
+	if err := json.NewDecoder(body).Decode(&manifest); err != nil {
+		return docker_manifest{}, err
+	}
+	if len(manifest.Manifests) == 0 {
+		return manifest, nil
+	}
+
+	selected_digest := manifest.Manifests[0].Digest
+	selected_platform := split_platform_name(platform_name)
+	for _, item := range manifest.Manifests {
+		if item.Platform.OS == selected_platform[0] && item.Platform.Architecture == selected_platform[1] {
+			if selected_platform[2] == "" || item.Platform.Variant == selected_platform[2] {
+				selected_digest = item.Digest
+				break
+			}
+		}
+	}
+	return fetch_docker_manifest(registry_base_url, image_name, selected_digest, platform_name)
+}
+
+func apply_docker_layer(root_dir string, registry_base_url string, image_name string, layer struct {
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
+}) error {
+	layer_url := registry_base_url + "/v2/" + image_name + "/blobs/" + layer.Digest
+	body, _, err := http_get_with_headers(layer_url, nil)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+
+	layer_reader := io.Reader(body)
+	if strings.Contains(layer.MediaType, "gzip") || strings.Contains(layer.MediaType, "zstd") || strings.Contains(layer.MediaType, "tar+gzip") {
+		gz_reader, err := gzip.NewReader(body)
+		if err != nil {
+			return err
+		}
+		defer gz_reader.Close()
+		layer_reader = gz_reader
+	}
+
+	tar_reader := tar.NewReader(layer_reader)
+	for {
+		header, err := tar_reader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		rel_path := normalize_rel_path(header.Name)
+		if rel_path == "" {
+			continue
+		}
+		base_name := path.Base(rel_path)
+		if strings.HasPrefix(base_name, ".wh.") {
+			whiteout_target := path.Join(path.Dir(rel_path), strings.TrimPrefix(base_name, ".wh."))
+			if whiteout_target == "." {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(root_dir, filepath.FromSlash(whiteout_target))); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			continue
+		}
+		dst_path := filepath.Join(root_dir, filepath.FromSlash(rel_path))
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dst_path, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeSymlink:
+			if runtime.GOOS == "windows" {
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(dst_path), 0o755); err != nil {
+				return err
+			}
+			_ = os.Remove(dst_path)
+			if err := os.Symlink(header.Linkname, dst_path); err != nil {
+				return err
+			}
+		default:
+			if err := os.MkdirAll(filepath.Dir(dst_path), 0o755); err != nil {
+				return err
+			}
+			out_file, err := os.Create(dst_path)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out_file, tar_reader); err != nil {
+				out_file.Close()
+				return err
+			}
+			if err := out_file.Close(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func http_get_with_headers(src_url string, headers map[string]string) (io.ReadCloser, bool, error) {
+	req, err := http.NewRequest(http.MethodGet, src_url, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	resp, insecure_retry, err := http_do(req)
+	if err == nil && resp.StatusCode == http.StatusUnauthorized {
+		token, token_err := docker_bearer_token(resp.Header.Get("Www-Authenticate"))
+		if token_err == nil && token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp.Body.Close()
+			resp, insecure_retry, err = http_do(req)
+		}
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		defer resp.Body.Close()
+		return nil, false, fmt.Errorf("request failed: %s", resp.Status)
+	}
+	return resp.Body, false, nil
+}
+
+func http_do(req *http.Request) (*http.Response, bool, error) {
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		return resp, false, nil
+	}
+	if !looks_like_tls_verify_error(err) {
+		return nil, false, err
+	}
+	insecure_client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	resp, retry_err := insecure_client.Do(req)
+	if retry_err != nil {
+		return nil, false, retry_err
+	}
+	return resp, true, nil
+}
+
+func docker_bearer_token(auth_header string) (string, error) {
+	if !strings.HasPrefix(strings.ToLower(auth_header), "bearer ") {
+		return "", errors.New("unsupported auth challenge")
+	}
+	params := map[string]string{}
+	for _, item := range strings.Split(strings.TrimSpace(auth_header[7:]), ",") {
+		pair := strings.SplitN(strings.TrimSpace(item), "=", 2)
+		if len(pair) != 2 {
+			continue
+		}
+		params[pair[0]] = strings.Trim(pair[1], `"`)
+	}
+	if params["realm"] == "" {
+		return "", errors.New("missing bearer realm")
+	}
+	query := url.Values{}
+	if params["service"] != "" {
+		query.Set("service", params["service"])
+	}
+	if params["scope"] != "" {
+		query.Set("scope", params["scope"])
+	}
+	token_url := params["realm"]
+	if encoded := query.Encode(); encoded != "" {
+		token_url += "?" + encoded
+	}
+	body, _, err := http_get_with_headers(token_url, nil)
+	if err != nil {
+		return "", err
+	}
+	defer body.Close()
+	var payload struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+		return "", err
+	}
+	return payload.Token, nil
+}
+
+func split_platform_name(platform_name string) [3]string {
+	selected := [3]string{"", "", ""}
+	parts := strings.Split(platform_name, "/")
+	for i := 0; i < len(parts) && i < 3; i++ {
+		selected[i] = parts[i]
+	}
+	return selected
 }
 
 func http_get(src_url string) (*http.Response, bool, error) {

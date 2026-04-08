@@ -2,7 +2,7 @@
 
 `hx` is a CLI tool that copies, downloads, or extracts a source into a local folder.
 
-This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `pypi://` package sources, `nuget://` package sources, and `npm://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
+This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `docker://` image sources, `pypi://` package sources, `nuget://` package sources, and `npm://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
 
 ## Usage
 
@@ -18,6 +18,7 @@ hx [flags] <source> [dest]
 - `http://` and `https://` Git repository URLs ending in `.git`
 - `git://` repository URLs
 - GitHub repository URLs such as `https://github.com/owner/repo`, `/tree/<ref>`, and `/commit/<sha>`
+- `docker://image[:tag]` image sources
 - `pypi://package` and `pypi://package@version` sources
 - `nuget://package` and `nuget://package@version` sources
 - `npm://package` and `npm://package@version` sources for non-scoped packages
@@ -41,6 +42,7 @@ hx [flags] <source> [dest]
 - archives are extracted into `dest`
 - plain files are copied into `dest`
 - Git sources are cloned to a temporary worktree and copied without the `.git` directory
+- `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
 - `npm://` resolves the package metadata and extracts or downloads the published tarball for the selected version
@@ -56,6 +58,7 @@ hx https://example.com/project.tar.gz ./out
 hx https://example.com/project.git ./out
 hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
+hx docker://busybox:latest ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out
 hx -registry https://registry.npmjs.org npm://lodash@4.17.21 ./out

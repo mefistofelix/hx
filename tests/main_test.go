@@ -198,6 +198,58 @@ func TestNPMExtraction(t *testing.T) {
 	}
 }
 
+func TestDockerExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+	layer_one := tar_gz_bytes2(t, map[string]string{
+		"root/keep.txt": "keep",
+		"root/live.txt": "live",
+	})
+	layer_two := tar_gz_bytes2(t, map[string]string{
+		"root/.wh.keep.txt": "",
+	})
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/library/busybox/manifests/latest":
+			w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+			_, _ = w.Write([]byte(`{
+				"schemaVersion": 2,
+				"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+				"config": {"digest": "sha256:config"},
+				"layers": [
+					{"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "digest": "sha256:layer1"},
+					{"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "digest": "sha256:layer2"}
+				]
+			}`))
+		case "/v2/library/busybox/blobs/sha256:layer1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(layer_one)
+		case "/v2/library/busybox/blobs/sha256:layer2":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(layer_two)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := run_hx(t, "-registry", server.URL, "docker://busybox:latest", dst_dir)
+	if strings.Contains(output, "error:") {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	if _, err := os.Stat(filepath.Join(dst_dir, "root", "keep.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected whiteout to remove keep.txt, err=%v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dst_dir, "root", "live.txt"))
+	must(t, err)
+	if string(data) != "live" {
+		t.Fatalf("unexpected docker content: %q", data)
+	}
+}
+
 func run_hx(t *testing.T, args ...string) string {
 	t.Helper()
 	command_args := append([]string{"run", "../src", "-quiet"}, args...)
@@ -222,13 +274,20 @@ func project_root(t *testing.T) string {
 
 func tar_gz_bytes(t *testing.T, name string, body string) []byte {
 	t.Helper()
+	return tar_gz_bytes2(t, map[string]string{name: body})
+}
+
+func tar_gz_bytes2(t *testing.T, files map[string]string) []byte {
+	t.Helper()
 	buffer := &bytes.Buffer{}
 	gzw := gzip.NewWriter(buffer)
 	tw := tar.NewWriter(gzw)
-	header := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}
-	must(t, tw.WriteHeader(header))
-	_, err := tw.Write([]byte(body))
-	must(t, err)
+	for name, body := range files {
+		header := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}
+		must(t, tw.WriteHeader(header))
+		_, err := tw.Write([]byte(body))
+		must(t, err)
+	}
 	must(t, tw.Close())
 	must(t, gzw.Close())
 	return buffer.Bytes()
