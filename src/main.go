@@ -136,6 +136,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_pypi(src_url, yield)
 	case "nuget":
 		return s.items_from_nuget(src_url, yield)
+	case "npm":
+		return s.items_from_npm(src_url, yield)
 	default:
 		return fmt.Errorf("unsupported source scheme: %s", src_url.Scheme)
 	}
@@ -392,6 +394,84 @@ func (s hx_src) items_from_nuget(src_url *url.URL, yield func(hx_item, error) bo
 	}
 
 	return stream_items(path.Base(artifact_url), artifact_url, resp.ContentLength, resp.Body, yield)
+}
+
+func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item, error) bool) error {
+	package_name := src_url.Host
+	version := ""
+	if src_url.User != nil {
+		package_name = src_url.User.Username()
+		version = src_url.Host
+	}
+	if package_name == "" || package_name == "." {
+		return errors.New("npm source requires a package name")
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = "https://registry.npmjs.org"
+	}
+
+	metadata_url := registry_base_url + "/" + package_name
+	resp, insecure_retry, err := http_get(metadata_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("npm metadata request failed: %s", resp.Status)
+	}
+
+	var payload struct {
+		DistTags map[string]string `json:"dist-tags"`
+		Versions map[string]struct {
+			Dist struct {
+				Tarball string `json:"tarball"`
+			} `json:"dist"`
+		} `json:"versions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if version == "" {
+		version = payload.DistTags["latest"]
+	}
+	if version == "" {
+		return errors.New("npm metadata returned no version")
+	}
+	package_version, ok := payload.Versions[version]
+	if !ok || package_version.Dist.Tarball == "" {
+		return errors.New("npm metadata returned no tarball for selected version")
+	}
+
+	tarball_url := package_version.Dist.Tarball
+	tarball_resp, insecure_retry, err := http_get(tarball_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	if tarball_resp.StatusCode < 200 || tarball_resp.StatusCode > 299 {
+		defer tarball_resp.Body.Close()
+		return fmt.Errorf("npm download failed: %s", tarball_resp.Status)
+	}
+	if s.download_only {
+		yield(hx_item{
+			src_stream:      tarball_resp.Body,
+			type_name:       "file",
+			src_url:         tarball_url,
+			src_full_path:   path.Base(tarball_url),
+			size_compressed: tarball_resp.ContentLength,
+			size:            tarball_resp.ContentLength,
+		}, nil)
+		return nil
+	}
+
+	return stream_items(path.Base(tarball_url), tarball_url, tarball_resp.ContentLength, tarball_resp.Body, yield)
 }
 
 // -----------------------------------------------------------------------------

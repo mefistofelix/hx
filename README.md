@@ -2,7 +2,7 @@
 
 `hx` is a CLI tool that copies, downloads, or extracts a source into a local folder.
 
-This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `pypi://` package sources, and `nuget://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
+This implementation currently supports local paths, `file://` paths, plain HTTP(S) downloads, Git repositories, GitHub repository URLs, `pypi://` package sources, `nuget://` package sources, and `npm://` package sources, plus extraction for `.zip`, `.tar`, `.tar.gz`, `.tgz`, and single-file `.gz`.
 
 ## Usage
 
@@ -20,6 +20,7 @@ hx [flags] <source> [dest]
 - GitHub repository URLs such as `https://github.com/owner/repo`, `/tree/<ref>`, and `/commit/<sha>`
 - `pypi://package` and `pypi://package@version` sources
 - `nuget://package` and `nuget://package@version` sources
+- `npm://package` and `npm://package@version` sources for non-scoped packages
 
 `dest` defaults to the current directory.
 
@@ -42,6 +43,7 @@ hx [flags] <source> [dest]
 - Git sources are cloned to a temporary worktree and copied without the `.git` directory
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
+- `npm://` resolves the package metadata and extracts or downloads the published tarball for the selected version
 - if HTTPS certificate verification fails, `hx` warns and retries insecurely
 - successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
 
@@ -56,6 +58,7 @@ hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out
+hx -registry https://registry.npmjs.org npm://lodash@4.17.21 ./out
 hx -download-only https://example.com/file.zip ./downloads
 hx -strip 1 ./sample.tar.gz ./out
 ```

@@ -166,6 +166,38 @@ func TestNuGetExtraction(t *testing.T) {
 	}
 }
 
+func TestNPMExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+	archive_data := tar_gz_bytes(t, "package/pkg/npm.txt", "from-npm")
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/lodash":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"dist-tags":{"latest":"4.17.21"},"versions":{"4.17.21":{"dist":{"tarball":"` + server.URL + `/lodash/-/lodash-4.17.21.tgz"}}}}`))
+		case "/lodash/-/lodash-4.17.21.tgz":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(archive_data)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := run_hx(t, "-registry", server.URL, "npm://lodash@4.17.21", dst_dir)
+	if strings.Contains(output, "error:") {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "package", "pkg", "npm.txt"))
+	must(t, err)
+	if string(data) != "from-npm" {
+		t.Fatalf("unexpected npm content: %q", data)
+	}
+}
+
 func run_hx(t *testing.T, args ...string) string {
 	t.Helper()
 	command_args := append([]string{"run", "../src", "-quiet"}, args...)
