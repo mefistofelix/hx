@@ -32,6 +32,6 @@
 
 - readability, the correct level of logical density, and code elegance are the top priority, all the rest is sacrificable
 
-- keep error handling minimal
+- keep the source files inside a src subdirectory in project root
 
-- centralize log and error reporting
+- keep the build binaries in 
