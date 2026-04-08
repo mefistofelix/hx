@@ -1,0 +1,7 @@
+bin/
+build_cache/
+tests_cache/
+*.exe
+*.test
+*.out
+
