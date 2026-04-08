@@ -95,6 +95,17 @@ func TestAPKExtraction(t *testing.T) {
 	}
 }
 
+func TestAPTExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+
+	run_hx(t, "-registry", "https://deb.debian.org/debian", "-target", "bookworm/main", "-platform", "linux/amd64", "apt://hello", dst_dir)
+
+	if _, err := os.Stat(filepath.Join(dst_dir, "usr", "bin", "hello")); err != nil {
+		t.Fatalf("expected hello binary, err=%v", err)
+	}
+}
+
 func run_hx(t *testing.T, args ...string) string {
 	t.Helper()
 	command_args := append([]string{"run", "../src", "-quiet"}, args...)

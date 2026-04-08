@@ -27,6 +27,8 @@ import (
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
 // -----------------------------------------------------------------------------
@@ -75,6 +77,7 @@ var (
 	tar_suffix           = ".tar"
 	gzip_suffix          = ".gz"
 	apk_suffix           = ".apk"
+	deb_suffix           = ".deb"
 	zip_suffixes         = []string{".zip", ".nupkg"}
 	git_suffix           = ".git"
 	github_host          = "github.com"
@@ -82,6 +85,8 @@ var (
 	done_sentinel_prefix = ".hx.done."
 	done_sentinel_suffix = ".json"
 	tls_retry_message    = "warning: https certificate verification failed, retrying insecurely"
+	apt_default_registry = "https://deb.debian.org/debian"
+	apt_default_target   = "stable/main"
 	hex_hash_rx          = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	tls_error_rx         = regexp.MustCompile(`(?i)(x509:|certificate|tls:)`)
 )
@@ -142,6 +147,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_npm(src_url, yield)
 	case "docker":
 		return s.items_from_docker(src_url, yield)
+	case "apt":
+		return s.items_from_apt(src_url, yield)
 	case "apk":
 		return s.items_from_apk(src_url, yield)
 	default:
@@ -527,6 +534,122 @@ func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) b
 	}
 
 	return walk_local_dir(work_dir, false, src_url.String(), yield)
+}
+
+func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item, error) bool) error {
+	package_name := src_url.Host
+	version := ""
+	if src_url.User != nil {
+		package_name = src_url.User.Username()
+		version = src_url.Host
+	}
+	if package_name == "" || package_name == "." {
+		return errors.New("apt source requires a package name")
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = apt_default_registry
+	}
+	repo_target := strings.Trim(strings.TrimSpace(s.target), "/")
+	if repo_target == "" {
+		repo_target = apt_default_target
+	}
+
+	platform_arch := split_platform_name(s.platform)[1]
+	if platform_arch == "" {
+		platform_arch = runtime.GOARCH
+	}
+	switch platform_arch {
+	case "386":
+		platform_arch = "i386"
+	}
+
+	index_url := registry_base_url + "/dists/" + repo_target + "/binary-" + platform_arch + "/Packages.gz"
+	resp, insecure_retry, err := http_get(index_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("apt index request failed: %s", resp.Status)
+	}
+
+	gz_reader, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return err
+	}
+	defer gz_reader.Close()
+	index_data, err := io.ReadAll(gz_reader)
+	if err != nil {
+		return err
+	}
+
+	selected_filename := ""
+	trimmed_index := strings.ReplaceAll(string(index_data), "\r\n", "\n")
+	for _, block := range strings.Split(trimmed_index, "\n\n") {
+		fields := map[string]string{}
+		last_key := ""
+		for _, line := range strings.Split(strings.TrimSpace(block), "\n") {
+			if line == "" {
+				continue
+			}
+			if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+				if last_key != "" {
+					fields[last_key] += "\n" + strings.TrimSpace(line)
+				}
+				continue
+			}
+			pair := strings.SplitN(line, ": ", 2)
+			if len(pair) != 2 {
+				continue
+			}
+			fields[pair[0]] = pair[1]
+			last_key = pair[0]
+		}
+		if fields["Package"] != package_name {
+			continue
+		}
+		if version != "" && fields["Version"] != version {
+			continue
+		}
+		selected_filename = fields["Filename"]
+		if selected_filename != "" {
+			break
+		}
+	}
+	if selected_filename == "" {
+		return errors.New("apt index returned no matching package")
+	}
+
+	artifact_url := registry_base_url + "/" + strings.TrimPrefix(selected_filename, "/")
+	artifact_resp, insecure_retry, err := http_get(artifact_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	if artifact_resp.StatusCode < 200 || artifact_resp.StatusCode > 299 {
+		defer artifact_resp.Body.Close()
+		return fmt.Errorf("apt download failed: %s", artifact_resp.Status)
+	}
+	if s.download_only {
+		yield(hx_item{
+			src_stream:      artifact_resp.Body,
+			type_name:       "file",
+			src_url:         artifact_url,
+			src_full_path:   path.Base(artifact_url),
+			size_compressed: artifact_resp.ContentLength,
+			size:            artifact_resp.ContentLength,
+		}, nil)
+		return nil
+	}
+
+	return stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield)
 }
 
 func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool) error {
@@ -977,6 +1100,9 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 		tmp_file.Close()
 		defer os.Remove(tmp_path)
 		return zip_items(tmp_path, src_url, yield)
+	case strings.HasSuffix(lower_name, deb_suffix):
+		defer src_stream.Close()
+		return deb_items(src_url, src_stream, yield)
 	default:
 		yield(hx_item{
 			src_stream:      src_stream,
@@ -987,6 +1113,76 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 			size:            src_size,
 		}, nil)
 		return nil
+	}
+}
+
+func deb_items(src_url string, src_stream io.Reader, yield func(hx_item, error) bool) error {
+	header := make([]byte, 8)
+	if _, err := io.ReadFull(src_stream, header); err != nil {
+		return err
+	}
+	if string(header) != "!<arch>\n" {
+		return errors.New("invalid deb archive header")
+	}
+
+	for {
+		file_header := make([]byte, 60)
+		_, err := io.ReadFull(src_stream, file_header)
+		if errors.Is(err, io.EOF) {
+			return errors.New("deb archive has no data tar member")
+		}
+		if err != nil {
+			return err
+		}
+		if string(file_header[58:60]) != "`\n" {
+			return errors.New("invalid deb archive file header")
+		}
+
+		member_name := strings.TrimSpace(string(file_header[:16]))
+		member_name = strings.TrimSuffix(member_name, "/")
+		member_size_text := strings.TrimSpace(string(file_header[48:58]))
+		var member_size int
+		if _, err := fmt.Sscanf(member_size_text, "%d", &member_size); err != nil {
+			return err
+		}
+
+		member_reader := io.LimitReader(src_stream, int64(member_size))
+		if strings.HasPrefix(member_name, "data.tar") {
+			switch {
+			case strings.HasSuffix(member_name, ".gz"):
+				gz_reader, err := gzip.NewReader(member_reader)
+				if err != nil {
+					return err
+				}
+				defer gz_reader.Close()
+				return tar_items(tar.NewReader(gz_reader), src_url, yield)
+			case strings.HasSuffix(member_name, ".xz"):
+				xz_reader, err := xz.NewReader(member_reader)
+				if err != nil {
+					return err
+				}
+				return tar_items(tar.NewReader(xz_reader), src_url, yield)
+			case strings.HasSuffix(member_name, ".zst"):
+				zstd_reader, err := zstd.NewReader(member_reader)
+				if err != nil {
+					return err
+				}
+				defer zstd_reader.Close()
+				return tar_items(tar.NewReader(zstd_reader), src_url, yield)
+			default:
+				return tar_items(tar.NewReader(member_reader), src_url, yield)
+			}
+		}
+
+		if _, err := io.Copy(io.Discard, member_reader); err != nil {
+			return err
+		}
+		if member_size%2 != 0 {
+			padding := make([]byte, 1)
+			if _, err := io.ReadFull(src_stream, padding); err != nil {
+				return err
+			}
+		}
 	}
 }
 
@@ -1001,6 +1197,9 @@ func tar_items(tr *tar.Reader, src_url string, yield func(hx_item, error) bool) 
 		}
 		normalized_path := normalize_rel_path(header.Name)
 		if normalized_path == "" {
+			if cleaned_header := strings.Trim(path.Clean(strings.ReplaceAll(header.Name, "\\", "/")), "/"); cleaned_header == "" || cleaned_header == "." {
+				continue
+			}
 			return fmt.Errorf("invalid archive path: %s", header.Name)
 		}
 		item := hx_item{
