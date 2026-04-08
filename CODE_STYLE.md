@@ -41,3 +41,7 @@
 - use the stdlib of the language proficiently and with creativity, never write custom code to split a string that conforms to a path for example, but simply use some function in https://pkg.go.dev/path/filepath golang but most language have large stdlibs, explore diligently, also use regexps match or splits avoid string operations
 
 - avoid hardcoding external data or paths or extensions, or anything, eventually as XDev about what to do
+
+- 1/2/3 lines functions smells like bad modularization, avoid them be careful and inline the code
+
+- also function with just one caller are bad modularization, keep the logic inline if so
