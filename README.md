@@ -15,6 +15,7 @@ hx [flags] <source> [dest]
 - local files and directories
 - `file://` local paths
 - `http://` and `https://` file/archive URLs
+- `http://` and `https://` Git repository URLs ending in `.git`
 - `git://` repository URLs
 - GitHub repository URLs such as `https://github.com/owner/repo`, `/tree/<ref>`, and `/commit/<sha>`
 
@@ -37,6 +38,7 @@ hx [flags] <source> [dest]
 - archives are extracted into `dest`
 - plain files are copied into `dest`
 - Git sources are cloned to a temporary worktree and copied without the `.git` directory
+- if HTTPS certificate verification fails, `hx` warns and retries insecurely
 - successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
 
 ## Examples
@@ -45,6 +47,7 @@ hx [flags] <source> [dest]
 hx ./sample.zip ./out
 hx ./folder ./out
 hx https://example.com/project.tar.gz ./out
+hx https://example.com/project.git ./out
 hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
 hx -download-only https://example.com/file.zip ./downloads

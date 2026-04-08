@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -144,10 +145,16 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item, error) b
 }
 
 func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) bool) error {
+	if looks_like_http_git_url(src_url) && !s.download_only {
+		return s.items_from_git(src_url.String(), src_url.Query().Get("ref"), yield)
+	}
 	if s.download_only {
-		resp, err := http.Get(src_url.String())
+		resp, insecure_retry, err := http_get(src_url.String())
 		if err != nil {
 			return err
+		}
+		if insecure_retry {
+			warn_tls_retry()
 		}
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			defer resp.Body.Close()
@@ -178,9 +185,12 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) boo
 		return stream_items(filepath.Base(src_url.Path), src_url.String(), info.Size(), open_local_stream(tmp_path), yield)
 	}
 
-	resp, err := http.Get(src_url.String())
+	resp, insecure_retry, err := http_get(src_url.String())
 	if err != nil {
 		return err
+	}
+	if insecure_retry {
+		warn_tls_retry()
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		defer resp.Body.Close()
@@ -645,9 +655,12 @@ func zip_items(zip_path string, src_url string, yield func(hx_item, error) bool)
 }
 
 func download_to_temp(src_url string) (string, error) {
-	resp, err := http.Get(src_url)
+	resp, insecure_retry, err := http_get(src_url)
 	if err != nil {
 		return "", err
+	}
+	if insecure_retry {
+		warn_tls_retry()
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -712,6 +725,16 @@ func looks_like_gzip(name string) bool {
 
 func looks_like_zip(name string) bool {
 	return strings.HasSuffix(name, ".zip")
+}
+
+func looks_like_http_git_url(src_url *url.URL) bool {
+	if src_url == nil {
+		return false
+	}
+	if src_url.Scheme != "http" && src_url.Scheme != "https" {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(src_url.Path), ".git")
 }
 
 func looks_like_windows_path(raw_value string) bool {
@@ -805,6 +828,37 @@ func is_hex_hash(raw_value string) bool {
 		return false
 	}
 	return true
+}
+
+func http_get(src_url string) (*http.Response, bool, error) {
+	resp, err := http.DefaultClient.Get(src_url)
+	if err == nil {
+		return resp, false, nil
+	}
+	if !looks_like_tls_verify_error(err) {
+		return nil, false, err
+	}
+	insecure_client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	resp, retry_err := insecure_client.Get(src_url)
+	if retry_err != nil {
+		return nil, false, retry_err
+	}
+	return resp, true, nil
+}
+
+func looks_like_tls_verify_error(err error) bool {
+	err_text := strings.ToLower(err.Error())
+	return strings.Contains(err_text, "x509:") ||
+		strings.Contains(err_text, "certificate") ||
+		strings.Contains(err_text, "tls:")
+}
+
+func warn_tls_retry() {
+	fmt.Fprintln(os.Stderr, "warning: https certificate verification failed, retrying insecurely")
 }
 
 func stop_to_nil(keep_going bool) error {

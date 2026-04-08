@@ -82,6 +82,27 @@ func TestHTTPArchiveAndSentinel(t *testing.T) {
 	}
 }
 
+func TestHTTPSArchiveInsecureFallback(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+	archive_data := tar_gz_bytes(t, "pkg/secure.txt", "fallback-ok")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(archive_data)
+	}))
+	defer server.Close()
+
+	output := run_hx(t, server.URL+"/sample.tar.gz", dst_dir)
+	data, err := os.ReadFile(filepath.Join(dst_dir, "pkg", "secure.txt"))
+	must(t, err)
+	if string(data) != "fallback-ok" {
+		t.Fatalf("unexpected https content: %q", data)
+	}
+	if !strings.Contains(output, "retrying insecurely") {
+		t.Fatalf("expected insecure retry warning, got %q", output)
+	}
+}
+
 func TestGitHubRepositoryExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	remote_base_dir := filepath.Join(root_dir, "remotes")
