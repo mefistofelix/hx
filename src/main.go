@@ -79,7 +79,6 @@ var (
 	done_sentinel_prefix = ".hx.done."
 	done_sentinel_suffix = ".json"
 	tls_retry_message    = "warning: https certificate verification failed, retrying insecurely"
-	windows_path_rx      = regexp.MustCompile(`^[A-Za-z]:[\\/].+`)
 	hex_hash_rx          = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	tls_error_rx         = regexp.MustCompile(`(?i)(x509:|certificate|tls:)`)
 )
@@ -867,7 +866,10 @@ func download_name(src_url *url.URL) string {
 // -----------------------------------------------------------------------------
 
 func parse_src_url(raw_value string) (*url.URL, string) {
-	if looks_like_windows_path(raw_value) {
+	if filepath.IsAbs(raw_value) {
+		return &url.URL{}, raw_value
+	}
+	if _, err := os.Lstat(raw_value); err == nil {
 		return &url.URL{}, raw_value
 	}
 	parsed, err := url.Parse(raw_value)
@@ -899,10 +901,6 @@ func looks_like_http_git_url(src_url *url.URL) bool {
 		return false
 	}
 	return strings.HasSuffix(strings.ToLower(src_url.Path), git_suffix)
-}
-
-func looks_like_windows_path(raw_value string) bool {
-	return windows_path_rx.MatchString(raw_value)
 }
 
 // GitHub HTTP URLs are rewritten so the rest of the source switch stays schema-based.
