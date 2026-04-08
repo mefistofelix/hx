@@ -130,6 +130,42 @@ func TestPyPIExtraction(t *testing.T) {
 	}
 }
 
+func TestNuGetExtraction(t *testing.T) {
+	root_dir := t.TempDir()
+	dst_dir := filepath.Join(root_dir, "out")
+
+	buffer := &bytes.Buffer{}
+	zw := zip.NewWriter(buffer)
+	file_writer, err := zw.Create("pkg/nuget.txt")
+	must(t, err)
+	_, err = file_writer.Write([]byte("from-nuget"))
+	must(t, err)
+	must(t, zw.Close())
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v3-flatcontainer/newtonsoft.json/13.0.3/newtonsoft.json.13.0.3.nupkg":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(buffer.Bytes())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := run_hx(t, "-registry", server.URL, "nuget://Newtonsoft.Json@13.0.3", dst_dir)
+	if strings.Contains(output, "error:") {
+		t.Fatalf("unexpected output: %q", output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst_dir, "pkg", "nuget.txt"))
+	must(t, err)
+	if string(data) != "from-nuget" {
+		t.Fatalf("unexpected nuget content: %q", data)
+	}
+}
+
 func run_hx(t *testing.T, args ...string) string {
 	t.Helper()
 	command_args := append([]string{"run", "../src", "-quiet"}, args...)

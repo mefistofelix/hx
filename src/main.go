@@ -72,7 +72,7 @@ var (
 	tar_gz_suffixes      = []string{".tar.gz", ".tgz"}
 	tar_suffix           = ".tar"
 	gzip_suffix          = ".gz"
-	zip_suffix           = ".zip"
+	zip_suffixes         = []string{".zip", ".nupkg"}
 	git_suffix           = ".git"
 	github_host          = "github.com"
 	default_download     = "download"
@@ -134,6 +134,8 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 		return s.items_from_git(github_clone_url(src_url), src_url.Query().Get("ref"), yield)
 	case "pypi":
 		return s.items_from_pypi(src_url, yield)
+	case "nuget":
+		return s.items_from_nuget(src_url, yield)
 	default:
 		return fmt.Errorf("unsupported source scheme: %s", src_url.Scheme)
 	}
@@ -194,7 +196,7 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) boo
 		}, nil)
 		return nil
 	}
-	if strings.HasSuffix(strings.ToLower(src_url.Path), zip_suffix) {
+	if has_suffix_fold(src_url.Path, zip_suffixes...) {
 		if s.force_no_tmp {
 			return errors.New("zip over http requires temp file unless -notmp 0")
 		}
@@ -319,6 +321,77 @@ func (s hx_src) items_from_pypi(src_url *url.URL, yield func(hx_item, error) boo
 	}
 
 	return stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield)
+}
+
+func (s hx_src) items_from_nuget(src_url *url.URL, yield func(hx_item, error) bool) error {
+	package_name := src_url.Host
+	version := ""
+	if src_url.User != nil {
+		package_name = src_url.User.Username()
+		version = src_url.Host
+	}
+	if package_name == "" || package_name == "." {
+		return errors.New("nuget source requires a package name")
+	}
+
+	registry_base_url := strings.TrimRight(s.registry_base_url, "/")
+	if registry_base_url == "" {
+		registry_base_url = "https://api.nuget.org"
+	}
+
+	if version == "" {
+		index_url := registry_base_url + "/v3-flatcontainer/" + strings.ToLower(package_name) + "/index.json"
+		resp, insecure_retry, err := http_get(index_url)
+		if err != nil {
+			return err
+		}
+		if insecure_retry {
+			fmt.Fprintln(os.Stderr, tls_retry_message)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return fmt.Errorf("nuget metadata request failed: %s", resp.Status)
+		}
+		var payload struct {
+			Versions []string `json:"versions"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return err
+		}
+		if len(payload.Versions) == 0 {
+			return errors.New("nuget metadata returned no versions")
+		}
+		version = payload.Versions[len(payload.Versions)-1]
+	}
+
+	artifact_url := registry_base_url + "/v3-flatcontainer/" +
+		strings.ToLower(package_name) + "/" + strings.ToLower(version) + "/" +
+		strings.ToLower(package_name) + "." + strings.ToLower(version) + ".nupkg"
+
+	resp, insecure_retry, err := http_get(artifact_url)
+	if err != nil {
+		return err
+	}
+	if insecure_retry {
+		fmt.Fprintln(os.Stderr, tls_retry_message)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		defer resp.Body.Close()
+		return fmt.Errorf("nuget download failed: %s", resp.Status)
+	}
+	if s.download_only {
+		yield(hx_item{
+			src_stream:      resp.Body,
+			type_name:       "file",
+			src_url:         artifact_url,
+			src_full_path:   path.Base(artifact_url),
+			size_compressed: resp.ContentLength,
+			size:            resp.ContentLength,
+		}, nil)
+		return nil
+	}
+
+	return stream_items(path.Base(artifact_url), artifact_url, resp.ContentLength, resp.Body, yield)
 }
 
 // -----------------------------------------------------------------------------
@@ -646,7 +719,7 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 			size_compressed: src_size,
 		}, nil)
 		return nil
-	case strings.HasSuffix(lower_name, zip_suffix):
+	case has_suffix_fold(lower_name, zip_suffixes...):
 		defer src_stream.Close()
 		tmp_file, err := os.CreateTemp("", "hx-local-zip-*.zip")
 		if err != nil {
@@ -911,6 +984,16 @@ func http_get(src_url string) (*http.Response, bool, error) {
 
 func looks_like_tls_verify_error(err error) bool {
 	return tls_error_rx.MatchString(err.Error())
+}
+
+func has_suffix_fold(raw_value string, suffixes ...string) bool {
+	lower_value := strings.ToLower(raw_value)
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(lower_value, strings.ToLower(suffix)) {
+			return true
+		}
+	}
+	return false
 }
 
 // -----------------------------------------------------------------------------
