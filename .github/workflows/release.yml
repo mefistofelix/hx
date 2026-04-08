@@ -28,7 +28,7 @@ jobs:
             binary_path: bin/hx.exe
             build_command: cmd /c build.bat
             test_command: cmd /c test.bat
-            package_command: powershell -NoLogo -NoProfile -Command "Compress-Archive -Path 'bin\\hx.exe' -DestinationPath \"\$env:ARCHIVE_NAME\" -Force"
+            package_command: tar -a -cf "$ARCHIVE_NAME" -C bin hx.exe
 
     runs-on: ${{ matrix.os }}
 
