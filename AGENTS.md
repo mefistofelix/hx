@@ -54,7 +54,7 @@
 
 - never ever change delete or modify agents.md claude.md code_style.md or code_design.md desiderata.md
 
-- create and keep updated also the workflow/ci pipeline to create release artifacts for linux and windows x64, reusing the build system we already have and avoiding importing thirdparty actions (for example use gh commands to checkout and not external thirdparty checkoutactions), also permit the workflow to be manually triggered
+- create and keep updated also the workflow/ci pipeline to create release artifacts for linux and windows x64, reusing the build system we already have and avoiding importing thirdparty actions even the GitHub official actions should be avoided (for example use gh commands to checkout and not external thirdparty checkoutactions), also permit the workflow to be manually triggered
 
 - install and handle gh commands to update/commit/create/push/handle workflows/delete repos/create repos/change repo descriptions etc, obtain a gh token with the required security scopes once or if something goes wrong by prompting to XDev the url and the code to allow the gh token to be initialized
 
