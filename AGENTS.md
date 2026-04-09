@@ -22,6 +22,8 @@
 
 - Whenever final user facing behavior change is made, always update `README.md` to reflect it in a simple systehetized non redundant way in the best section available or create a new section, README.md reflects and documents for the final user the current features implemented in the project at the current stage of development
 
+- also update the github repo description if we are working ok a github repo with an updated and short description of the project when something changes
+
 - whenever a feature or code change it's significative keep the test suite updated
 
 - its imperative you follow CODE_STYLE.md for any line of code written or rewritten changed
@@ -46,7 +48,9 @@
 
 - keep an updated test suite the tests subdirectory in project root
 
-- when the feature is about interoperability with external services or registries, tests are expected to hit real public endpoints and real published artifacts, not simulated local equivalents
+- when the feature is about interoperability with external services or registries, tests are expected to hit real public endpoints and real published artifacts, not simulated local equivalents, choose significative examples but optimize for low badwith and execution time
+
+- run test only when something important is changed not at every prompt round, and when running tests run only the ones for the current development env os
 
 - build and tests subsystems will save cache/ephemeral data respectively to build_cache and tests_cache
 
@@ -56,6 +60,14 @@
 
 - create and keep updated also the workflow/ci pipeline to create release artifacts for linux and windows x64, reusing the build system we already have and avoiding importing thirdparty actions even the GitHub official actions should be avoided (for example use gh commands to checkout and not external thirdparty checkoutactions), also permit the workflow to be manually triggered
 
+- if possible prefer a linux machine for the github action and crosscompile to create the release for other platforms, if not possible use different machines in the seme workflow
+
 - install and handle gh commands to update/commit/create/push/handle workflows/delete repos/create repos/change repo descriptions etc, obtain a gh token with the required security scopes once or if something goes wrong by prompting to XDev the url and the code to allow the gh token to be initialized
 
 - if the current developement env is windows and you need to execute or test something in a linux env use windows wsl ubuntu, eventually install the wsl subsystem and distro if missing, also use the root flag in wsl to enter the subsystem to install packages etc, you can always switch to a non root user from root using su
+
+- prefer using latest versions of runtimes, compilers and tools used
+
+- prefer ubuntu linux distro both for wsl and github actions
+
+- prefer linux line ending for text, script and source files independently from the current dev env os, fallback to other line endings only if required
