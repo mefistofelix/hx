@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build/test.sh"
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "$root_dir/build/build.sh"
+bash "$root_dir/tests/cli_smoke.sh"
