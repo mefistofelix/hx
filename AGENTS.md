@@ -48,7 +48,7 @@
 
 - keep an updated test suite the tests subdirectory in project root
 
-- when the feature is about interoperability with external services or registries, tests are expected to hit real public endpoints and real published artifacts, not simulated local equivalents, choose significative examples but optimize for low badwith and execution time
+- when the feature is about interoperability with external services or registries, tests are expected to hit real public endpoints and real published artifacts, not simulated local equivalents, choose significative examples but optimize for low badwith and execution time, also if artifacts or endpoint are required from the internet choose mainstream things that are exepected to last
 
 - run test only when something important is changed not at every prompt round, and when running tests run only the ones for the current development env os
 
