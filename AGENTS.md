@@ -1,103 +1,83 @@
-# Entities referenced in this document
+# Terms
 
-- XProject is the current project we are working on
+- `XProject` MUST mean the current project.
+- `XDev` MUST mean the developer instructing work on `XProject`.
+- `XAgent` MUST mean the AI agent developing `XProject`.
+- `XProjectUser` MUST mean the final released-project user.
 
-- XDev is the user prompiting requests to develop XProject
+# Rules
 
-- XAgent is the ai agent for which these rules are written for which AiDev prompt to in order to develop the XProject
+- `XAgent` MUST initialize git if the project is not already a git repository.
+- `XAgent` MUST keep `.gitignore` present and meaningfully updated for this project.
+- `XAgent` MUST create a local git commit on the current branch at the end of every prompt-round if local changes were made.
+- `XAgent` MUST explicitly notify `XDev` if something goes wrong.
+- `XAgent` MUST be technical and concise in answers and comments to `XDev`.
+- `XAgent` MUST answer in the language used by `XDev`.
+- `XAgent` MUST keep established programming terms in their natural form when literal translation would be misleading.
+- `XAgent` MUST keep code comments, `README.md`, and other project user-facing text in English unless `XDev` explicitly requests otherwise.
 
-- XProjectUser, its the user that will use the project while released
+- `DESIDERATA.md` MUST be treated as the high-level target feature set and MUST NOT be edited by `XAgent`.
+- Before implementing anything derived from `DESIDERATA.md`, `XAgent` MUST compare the logical differences between `DESIDERATA.md` and `README.md`.
+- Before implementing anything derived from those differences, `XAgent` MUST ask `XDev` for confirmation.
+- `README.md` MUST be treated as the end-user-facing description of currently implemented behavior.
+- Whenever final user-facing behavior changes, `XAgent` MUST update `README.md` in the best existing section or create a new one, and the update MUST be simple, synthesized, and non-redundant.
 
-# Agent rules
+- `XAgent` MUST follow `CODE_STYLE.md` for every written or rewritten line of code.
+- `XAgent` MUST follow `CODE_DESIGN.md` for every code-structure decision.
+- `CODE_DESIGN.md` MUST be treated as authoritative for signatures, structs, classes, functions, methods, and structural intent.
+- `XAgent` MUST NOT invent or add structural elements that are not present in `CODE_DESIGN.md`.
+- If `XAgent` determines that `CODE_DESIGN.md` cannot be followed, `XAgent` MUST explain why, MUST propose the needed design change to `XDev`, MUST wait for `XDev` to update `CODE_DESIGN.md`, and MUST NOT edit `CODE_DESIGN.md` directly.
 
-## All the following rules are important regardless the order of apparence
+- `XAgent` MUST keep source files under `src/`.
+- `XAgent` MUST keep build outputs under `bin/`.
+- `XAgent` MUST keep the self-contained build system under `build/`.
+- `XAgent` MUST keep the main source file as `src/main.<ext>` according to the language, for example `src/main.go`.
+- `XAgent` MUST NOT proliferate source files and MUST keep code in the main source file unless `CODE_DESIGN.md` explicitly requires otherwise.
+- `XAgent` MUST keep tests under `tests/`.
+- Build and test subsystems MUST store cache and ephemeral data in `build_cache/` and `tests_cache/` respectively.
 
-- if not initiliazed init git
+- Tooling and build systems MUST be standalone, relocatable on the filesystem, platform-independent when reasonably possible, and cold-bootstrappable.
+- Tooling and build systems MUST NOT require manual dependency download, manual extraction, or manual configuration by `XDev` or `XProjectUser`.
+- Build entrypoints SHOULD be small scripts such as `build.bat`, `build.sh`, or equivalent, able to bootstrap their requirements automatically.
+- `XAgent` SHOULD use the latest stable runtimes, compilers, and tools.
+- `XAgent` SHOULD prefer Ubuntu for WSL and GitHub Actions.
+- Text, script, and source files SHOULD use LF line endings regardless of host OS, unless another format is strictly required.
 
-- initialize and update accordinly to other rules and in a meaningful way a gitignore file for this project
+- `XAgent` MUST keep the test suite updated whenever a feature or code change is significant.
+- `XAgent` MUST NOT run tests at every prompt-round by default.
+- `XAgent` MUST run tests when something important changed.
+- When running tests, `XAgent` MUST run only the tests relevant to the current development OS.
+- For CLI projects, tests MUST treat the executable interface as the source of truth and MUST be conceived primarily as CLI black-box tests.
+- For interoperability with public registries or services, tests MUST hit real public endpoints and real published artifacts, not simulated local equivalents.
+- Such tests SHOULD use meaningful, mainstream, likely-stable examples and SHOULD optimize for low bandwidth and execution time.
+- `XAgent` MUST NOT add code, features, flags, environment variables, or behavior only to simplify, fake, or mock tests unless `CODE_DESIGN.md` explicitly requires it.
 
-- At the end of each prompt-round commit changes in the current branch if something goes wrong notify the XDev
+- `XAgent` MUST keep the CI/workflow pipeline updated so it can create release artifacts for Linux x64 and Windows x64.
+- The CI/workflow pipeline MUST reuse the existing build system.
+- The CI/workflow pipeline MUST permit manual triggering.
+- `XAgent` SHOULD avoid third-party GitHub Actions, including official GitHub Actions, when shell commands or `gh` can reasonably replace them.
+- `XAgent` SHOULD prefer Linux GitHub runners and cross-compilation for other targets when practical; otherwise it SHOULD use multiple runners in the same workflow.
 
-- DESIDERATA.md if foundamental and repesents more or less verbosely the destination/finel feature set we want to implement in the project/code, this file can change in the project developement, but you should never touch it only XDev wil eventually update id to inform you about a new desiderata, you must check the logical not raw diffrences between DESIDERATA.md and README.md to discover what needs to be implemented, beforse starting to implementn something however always ask XDev for confirmation
+- `XAgent` MUST use and manage `gh` for repository, branch, push, workflow, tag, release, and metadata operations when those actions are needed.
+- If `gh` authentication is missing or broken, `XAgent` MUST ask `XDev` to complete the authentication flow and MUST provide the URL/code flow needed to initialize the token with the required scopes.
 
-- Whenever final user facing behavior change is made, always update `README.md` to reflect it in a simple systehetized non redundant way in the best section available or create a new section, README.md reflects and documents for the final user the current features implemented in the project at the current stage of development
+- If the repository has a configured GitHub remote and `gh` is authenticated, then after every significant user-facing or release-relevant change `XAgent` MUST push the current branch.
+- If the repository has a configured GitHub remote and `gh` is authenticated, then after every significant user-facing or release-relevant change `XAgent` MUST update the GitHub repository description if the project scope or message changed materially.
+- If the repository has a configured GitHub remote and `gh` is authenticated, then after every significant user-facing or release-relevant change `XAgent` MUST create or update the release tag and the corresponding GitHub Release.
+- In such cases, `XAgent` MUST state in the final response exactly which push, tag, and release were created.
+- Significant user-facing or release-relevant changes MUST include at least new features, new CLI flags, behavior changes visible to `XProjectUser`, support for new platforms, formats, or protocols, and fixes to previously broken advertised behavior.
+- `XAgent` MUST NOT treat push, tag, or release as optional when the previous conditions are met.
+- If a GitHub remote is missing, `gh` is not authenticated, or push, tag, or release creation fails, `XAgent` MUST explicitly report the exact blocking command or error in the same prompt-round final response.
+- If no significant user-facing or release-relevant change happened, `XAgent` MUST NOT create a tag or release.
+- Missing a required push, tag, or release when the previous conditions are met MUST be treated as a rule violation.
 
-- also commit and push and update the github repo description (with a catchy summary) and tag/trigger a release when something important changes and we have a github repo linked to the project
+- If the current development environment is Windows and Linux execution or testing is needed, `XAgent` MUST use WSL Ubuntu.
+- If WSL or the Ubuntu distro is missing and Linux execution is needed, `XAgent` MUST install it.
+- If privileged work is needed inside WSL, `XAgent` MUST use root first and SHOULD switch to a non-root user afterward when appropriate.
 
-- whenever a feature or code change it's significative keep the test suite updated
+- If `XAgent` needs extra tools that are not available in the current environment, `XAgent` MUST install them in portable form under `.agents_tools/`.
+- `XAgent` MUST track such tools in `AGENTS_TOOLS.md`.
+- Such tools MUST be used only by `XAgent` for development workflow support and MUST NOT become part of the project itself unless `XDev` explicitly requests it.
+- Examples of such tools MAY include `rg`, `osquery`, `xmake`, or similar utilities.
 
-- its imperative you follow CODE_STYLE.md for any line of code written or rewritten changed
-
-- its imperative you follow CODE_DESIGN.md for any addition or change in the code structure, there you will find, in pseudocode, the signatures of classes, structs, functions, methods, and comments around all this code elements them to follow, never expand or dream different solutions from said design, if you find that its absolutely impossible to attain to the design specified in CODE_DESIGN.md and you need to add a new function or or struct or anything not present in the design than explain why and propose a change to XDev, but never chage the CODE_DESIGN.md file, if XDev will like your proposed change in design XDev will change itself manually in any way he likes and will notify you so you can reread CODE_DESIGN.md to proceed, and the dev loop restarts as written above
-
-- Be as thecnical and concise as you can in your answers and comments, XDev its a serious developer and its not your friend its your boss/coworker
-
-- if prompts from XDev are in a specific languare answer in that language, beting careful to translate only the words that make senses in the target language, for example if the target language is italian you shoud not traslate afunction "signature" to "firma" but keep it as is, it's also important to remember that differently from comunications targeted to XDev all the code comments readme and other output shoud be in english if not expressely said otherwise
-
-- keep any required tooling and build system standalone platform independent relocatable on the fs (using relative paths when possible or anything else), and cold bootstrappable no manual dependencies to download configure extract etc etc for the end user and the developer, for example a single build.bat and/or .ps1 and/or .sh that download all the requirements and build all
-
-- keep the source files inside a src subdirectory in project root
-
-- keep the build output binaries in the bin subdirectory in project root
-
-- keep the self contained build system in the build subdirectory in project root
-
-- keep the main source file in src/main.c for c for example or src/main.go for golang
-
-- dont proliferate source files use only the main source file until specified otherwise in CODE_DESIGN.md
-
-- keep an updated test suite the tests subdirectory in project root
-
-- when the feature is about interoperability with external services or registries, tests are expected to hit real public endpoints and real published artifacts, not simulated local equivalents, choose significative examples but optimize for low badwith and execution time, also if artifacts or endpoint are required from the internet choose mainstream things that are exepected to last
-
-- run test only when something important is changed not at every prompt round, and when running tests run only the ones for the current development env os
-
-- build and tests subsystems will save cache/ephemeral data respectively to build_cache and tests_cache
-
-- never and ever add features or any line of code or enviroement variable or cli argument in the code for the purpose to simplify or mock the test suite, do that only if asked explicitly in CODE_DESIGN.md
-
-- never ever change delete or modify agents.md claude.md code_style.md or code_design.md desiderata.md
-
-- create and keep updated also the workflow/ci pipeline to create release artifacts for linux and windows x64, reusing the build system we already have and avoiding importing thirdparty actions even the GitHub official actions should be avoided (for example use gh commands to checkout and not external thirdparty checkoutactions), also permit the workflow to be manually triggered
-
-- if possible prefer a linux machine for the github action and crosscompile to create the release for other platforms, if not possible use different machines in the seme workflow
-
-- install and handle gh commands to update/commit/create/push/handle workflows/delete repos/create repos/change repo descriptions etc, obtain a gh token with the required security scopes once or if something goes wrong by prompting to XDev the url and the code to allow the gh token to be initialized
-
-- if the current developement env is windows and you need to execute or test something in a linux env use windows wsl ubuntu, eventually install the wsl subsystem and distro if missing, also use the root flag in wsl to enter the subsystem to install packages etc, you can always switch to a non root user from root using su
-
-- prefer using latest versions of runtimes, compilers and tools used
-
-- prefer ubuntu linux distro both for wsl and github actions
-
-- prefer linux line ending for text, script and source files independently from the current dev env os, fallback to other line endings only if required
-
-- for cli projects, the source of truth for testing is the executable interface, not internal language-level test structure; tests must be conceived and organized as cli black-box tests first
-
-- if you happens to needs tool that are not available in the current dev env to work better as XAgent, download them in a portable mode inside a project subfolder .agents_tools and use them, also track them in AGENTS_TOOLS.md for your convenience and future memory. anyway they shold never ever gets related to other aspects of the project only you XAgent can use them in prompt/rounds es. ripgrep (rg command), osquery, xmake or others
-
-- After every prompt-round, if local changes were made, always create a local git commit in the current branch.
-
-- If the repository has a configured GitHub remote and the `gh` CLI is authenticated, then after every significant user-facing or release-relevant change you must also:
-  
-  - push the current branch
-  - update the GitHub repository description if the project scope/message changed materially
-  - create or update a git tag for the new release
-  - create or update the corresponding GitHub Release
-  - mention in the final response exactly which push, tag, and release were created
-
-- A "significant user-facing or release-relevant change" includes at least:
-  
-  - new features
-  - new CLI flags
-  - behavior changes visible to XProjectUser
-  - support for new platforms/formats/protocols
-  - fixes to previously broken advertised features
-
-- Do not treat push/tag/release as optional in those cases.
-
-- If a GitHub remote is missing, or `gh` is not authenticated, or release creation fails, you must explicitly say so in the same prompt-round final response and report the exact blocking command/error.
-
-- If no significant user-facing or release-relevant change happened, do not create a tag or release.
-
-- Missing a required push/tag/release when the above conditions are met is a rule violation.
+- `XAgent` MUST NOT modify, delete, or rewrite `AGENTS.md`, `CLAUDE.md`, `CODE_STYLE.md`, `CODE_DESIGN.md`, or `DESIDERATA.md` unless `XDev` explicitly requests that exact change.

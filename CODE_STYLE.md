@@ -1,64 +1,61 @@
 # Code Style
 
-- name variables classes functions structs fields and all possible target language elements that ha a name, with meaninful but concise names, but you can use also 1/2/3 charaters names when there is no confusion in the namespace for example the classical i for a loop
+- Names for variables, functions, structs, classes, fields, and other language elements MUST be meaningful and concise.
+- Very short names SHOULD be used only when they are conventional and unambiguous in local scope, for example `i` in a loop.
+- Naming SHOULD use grouping patterns such as prefixes or underscores when that improves clarity.
+- `snake_case` SHOULD be used when the target language allows it and the result still feels natural.
 
-- use prefixes and underscore when possible or where make sense to group multiple names togheter
+- Comments MUST be concise and MUST be written whenever the code would otherwise be ambiguous.
+- Comment depth SHOULD be proportional to complexity.
+- Small code blocks SHOULD receive a short general comment when needed.
+- Peculiar or surprising logic SHOULD receive deeper explanation when needed.
+- Large files SHOULD use section comments to group related code and keep ordering clear.
 
-- use snake_case when possible but only if there are no target language limits and the code will feel natural anyway
+- New functions, classes, structs, globals, or similar abstractions MUST NOT be added without a good reason.
+- Before adding a new abstraction, `XAgent` SHOULD first evaluate whether an existing one can be extended naturally and readably.
+- Tiny 1-3 line functions SHOULD be treated as a code smell and SHOULD be inlined when they add no real abstraction.
+- Functions with a single caller SHOULD be treated as a code smell and SHOULD be inlined when that improves readability.
+- Local or global variables MUST NOT be proliferated when they only relay the same value without adding meaning.
 
-- you must comment in a succint way and always when there is ambiguity, be proportional to the context, for example a small function of 7 lines need only a not too long general comment about why is needed, about arguments and output, but if its doing something peculiar that needs attention comment it more profoundly
+- Code MUST optimize first for readability, correct logical density, and elegance.
+- Performance MUST NOT be pursued at the cost of readability, correct logical density, or elegance.
+- Code SHOULD stay in the middle ground between over-fragmented boilerplate and overly dense obscurity.
+- Nesting SHOULD be minimized.
+- Replacing a nested block with a trivial helper that only hides the same nesting MUST NOT be treated as a valid simplification.
+- `XAgent` SHOULD prefer structurally better solutions over mechanical extraction.
+- Patterns and general rules SHOULD be preferred over repetitive conditionals and mechanical boilerplate.
 
-- place section comments like an horizontal line with a comment about ok there are all the utility functions and then keep the functions and code ordered to attain to the sections
+- Error handling SHOULD be minimal.
+- Logging and error reporting SHOULD be centralized.
 
-- never grow the number of functions/classes/structs etc without a good reason, think if you can adapt an already available function adding one optional parameter while keeping backward compatibility or reuse something in a meaningful way that feels natural and make sense, it other word really add things if really needed
+- The correct parser MUST be used for structured values.
+- For common formats, `XAgent` MUST use the stdlib or the proper parser/library instead of manual string splitting or convoluted ad-hoc handling.
+- If a decision depends on a complex value meaning, `XAgent` MUST parse the value first and MUST reason from the parsed representation.
+- After parsing, the parsed object MUST become the source of truth, and `XAgent` MUST NOT derive the same semantics again from the raw string in parallel.
+- If the format is uncommon and no good parser exists, `XAgent` SHOULD write a parser function and then use it consistently.
+- The stdlib MUST be used proficiently and creatively.
+- Regex SHOULD be preferred over manual string operations when regex is the natural tool.
 
-- prefer using jsonata (both on json and yaml) and xpath (for xml) third party libs instead of adding specific structs for this kind of data
+- `XAgent` SHOULD prefer JSONata for JSON/YAML querying and XPath for XML querying instead of adding many specific structs when that improves clarity and coverage.
+- For SQL, JSONata, XPath, and similar query systems, `XAgent` SHOULD choose query strategies that cover the largest useful set of cases with a good balance of clarity and performance.
+- Query design SHOULD prefer merging multiple code paths into a smaller number of expressive paths when that remains readable.
 
-- reason about the elegance and logic density in the code and always keep it in the middle both while writing new code or when rewiting a chunk of existing code
+- `XAgent` MUST NOT pass around heavyweight references such as HTTP clients or Go contexts unless they are truly required.
+- `XAgent` SHOULD prefer direct, readable control flow over fashionable patterns or best-practice cargo culting.
+- If the language supports generators or async generators naturally, `XAgent` SHOULD prefer them over callbacks or event-style APIs when they make the code clearer.
 
-- about sql/jsonata/xpath or any other kind of data query reason about which query tactic will cover most of the requirements to merge multiple eventually required code paths in one, also taking in account a good balance for the performance
+- External data, paths, extensions, and similar assumptions MUST NOT be hardcoded without a good reason.
+- If such a choice is required and unclear, `XAgent` SHOULD ask `XDev`.
 
-- don't exagerate about writing performant code at any cost, the requirement to have elegance and logic density in the middle is more important
+- For Go projects, the following libraries SHOULD be preferred when needed:
+- JSONata: `https://github.com/RecoLabs/gnata`
+- Archive extraction: `https://github.com/mholt/archives`
+- YAML: `https://github.com/yaml/go-yaml`
+- XPath: `https://github.com/speedata/goxpath`
+- Doublestar glob: `https://github.com/bmatcuk/doublestar`
 
-- avoid too much nesting, but be very careful simply replacing a nested block with a function call that have the next deep levels of that nesting is not solving the problem it's making it worse, you need to think out of the box and find better solutions
+- `XAgent` MUST ask `XDev` before adding any additional third-party dependency.
+- For Python runtime and package management, `XAgent` MUST use `uv`.
+- For JavaScript or TypeScript, `XAgent` MUST use Bun, and SHOULD use Deno as fallback if needed.
 
-- find patterns and avoid conditions every where is possible i dont want mechanical boilerplate at all: like `if a = "v" then b = "v"`
-
-- avoid passing around objects references from function to function like http clients or golang contextes if not really required, i dont like best practices i like and absolutely want elegant readable code at all costs of performance or any best practices being negated
-
-- use the right parser for the value, if you need to switch or do something based on a  complex meaninng of the value like for example on a url schema use the url parser and the simply switch on the url_parsed.schema, never ever do string splitting and strance convulted handling of the value for common formats like an url, and if the case is not commong write a parser function yourself and use it
-
-- dont proliferate local or global variables passing from variable to variable the same thing withot a reason
-
-- readability, the correct level of logical density, and code elegance are the top priority, all the rest is sacrificable
-
-- keep error handling minimal
-
-- centralize log and error reporting
-
-- remember to use generators/async generators when the language support it dont use callbacks and events if a generator/yield/loop can be used
-
-- use the stdlib of the language proficiently and with creativity, never write custom code to split a string that conforms to a path for example, but simply use some function in https://pkg.go.dev/path/filepath golang but most language have large stdlibs, explore diligently, also use regexps match or splits avoid string operations
-
-- after parsing a value with the proper stdlib parser, the parsed object becomes the source of truth; do not keep deriving semantics from the raw string in parallel
-
-- avoid hardcoding external data or paths or extensions, or anything, eventually as XDev about what to do
-
-- 1/2/3 lines functions smells like bad modularization, avoid them be careful and inline the code
-
-- also function with just one caller are bad modularization, keep the logic inline if so
-
-- preferred libs for golang:
-  jsonata: https://github.com/RecoLabs/gnata
-  archive extraction: https://github.com/mholt/archives
-  yaml: https://github.com/yaml/go-yaml
-  xpath: https://github.com/speedata/goxpath
-  doublestar glob: https://github.com/bmatcuk/doublestar
-
-- ask for any additional third party library dependency
-
-- for python runtime and package management always use uv https://github.com/astral-sh/uv
-
-- for javascript/typescript always use bun or deno as fallback if problems arises
-
-- less code lines always better then more code lines
+- Fewer lines of code SHOULD be preferred when readability, elegance, and logical density are preserved.
