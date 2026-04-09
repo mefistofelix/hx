@@ -3,7 +3,8 @@ setlocal EnableExtensions
 
 set "ROOT_DIR=%~dp0.."
 set "BUILD_CACHE=%ROOT_DIR%\build_cache"
-set "GO_ROOT=%BUILD_CACHE%\go_sdk"
+set "GO_ROOT=%BUILD_CACHE%\go"
+set "LEGACY_GO_ROOT=%BUILD_CACHE%\go_sdk"
 set "GO_STAGE=%BUILD_CACHE%\go_stage"
 set "GO_EXE=%GO_ROOT%\bin\go.exe"
 set "GO_VERSION=1.26.2"
@@ -19,7 +20,11 @@ if exist "%GO_EXE%" (
 
 if not exist "%BUILD_CACHE%" mkdir "%BUILD_CACHE%"
 if exist "%GO_ROOT%" rmdir /s /q "%GO_ROOT%"
+if exist "%LEGACY_GO_ROOT%" rmdir /s /q "%LEGACY_GO_ROOT%"
 if exist "%GO_STAGE%" rmdir /s /q "%GO_STAGE%"
+if exist "%GO_ROOT%" powershell -NoProfile -Command "Remove-Item -LiteralPath '%GO_ROOT%' -Recurse -Force"
+if exist "%LEGACY_GO_ROOT%" powershell -NoProfile -Command "Remove-Item -LiteralPath '%LEGACY_GO_ROOT%' -Recurse -Force"
+if exist "%GO_STAGE%" powershell -NoProfile -Command "Remove-Item -LiteralPath '%GO_STAGE%' -Recurse -Force"
 mkdir "%GO_STAGE%"
 set "GO_ARCHIVE=%BUILD_CACHE%\go-%GO_VERSION%.windows-%ARCH%.zip"
 if exist "%GO_ARCHIVE%" del /f /q "%GO_ARCHIVE%"

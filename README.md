@@ -106,3 +106,9 @@ test.bat
 # Linux / macOS
 chmod +x test.sh && ./test.sh
 ```
+
+## Platform Notes
+
+- symlinks are preserved on Windows and Unix-like platforms when the current user can create symbolic links
+- on Windows, local or extracted symlink creation may require Developer Mode or equivalent symlink privilege
+- `docker://` sources work without Docker or Podman on every platform

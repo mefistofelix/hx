@@ -22,6 +22,33 @@ if not exist "%CASE_DIR%\out\payload.txt" (
     exit /b 1
 )
 
+set "CASE_DIR=%TESTS_CACHE%\link"
+mkdir "%CASE_DIR%\out" || exit /b 1
+> "%CASE_DIR%\payload.txt" echo linked
+set "LINK_TEST_READY=1"
+pushd "%CASE_DIR%" >nul || exit /b 1
+cmd /c mklink "src_link.txt" "payload.txt" >nul 2>nul
+if errorlevel 1 (
+    set "LINK_TEST_READY="
+)
+popd >nul
+if not defined LINK_TEST_READY (
+    echo test note: skipping windows symlink case, missing symlink privilege
+)
+if defined LINK_TEST_READY (
+    "%HX_EXE%" -quiet "%CASE_DIR%\src_link.txt" "%CASE_DIR%\out" || exit /b 1
+    dir /al "%CASE_DIR%\out\src_link.txt" >nul 2>nul
+    if errorlevel 1 (
+        echo test failed: missing symlink %CASE_DIR%\out\src_link.txt
+        exit /b 1
+    )
+    for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-Item -LiteralPath ''%CASE_DIR%\out\src_link.txt'').Target"') do set "LINK_TARGET=%%I"
+    if /I not "%LINK_TARGET%"=="payload.txt" (
+        echo test failed: unexpected symlink target %LINK_TARGET%
+        exit /b 1
+    )
+)
+
 set "CASE_DIR=%TESTS_CACHE%\http"
 mkdir "%CASE_DIR%\out" || exit /b 1
 "%HX_EXE%" -quiet -strip 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "%CASE_DIR%\out" || exit /b 1

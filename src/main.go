@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
@@ -72,11 +73,14 @@ type hx_tui struct {
 	mode        string
 	item_count  int
 	total_bytes int64
+	warned      map[string]bool
 }
 
 type bool_flag struct {
 	value *bool
 }
+
+var windows_symlink_privilege_warning sync.Once
 
 var (
 	tar_gz_suffixes      = []string{".tar.gz", ".tgz"}
@@ -157,6 +161,17 @@ func normalize_bool_flag_args(args []string, bool_flags map[string]bool) []strin
 
 func (h *hx_tui) warn(msg string) {
 	fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
+}
+
+func (h *hx_tui) warn_once(key string, msg string) {
+	if h.warned == nil {
+		h.warned = map[string]bool{}
+	}
+	if h.warned[key] {
+		return
+	}
+	h.warned[key] = true
+	h.warn(msg)
 }
 
 func (h *hx_tui) show_item(item hx_item) {
@@ -1582,11 +1597,12 @@ func (d hx_dst) copy_link(item hx_item) error {
 			return err
 		}
 	}
-	if runtime.GOOS == "windows" {
-		d.tui.warn("symlink extraction is skipped on windows")
+	err := os.Symlink(item.src_link_path, item.dst_full_path)
+	if is_windows_symlink_privilege_error(err) {
+		d.tui.warn_once("windows_symlink_privilege", "windows symlink privilege is unavailable, skipping symlink entries")
 		return nil
 	}
-	return os.Symlink(item.src_link_path, item.dst_full_path)
+	return err
 }
 
 func (d hx_dst) copy_file(item hx_item) error {
@@ -2388,14 +2404,15 @@ func apply_docker_layer(root_dir string, registry_base_url string, image_name st
 				return err
 			}
 		case tar.TypeSymlink:
-			if runtime.GOOS == "windows" {
-				continue
-			}
 			if err := os.MkdirAll(filepath.Dir(dst_path), 0o755); err != nil {
 				return err
 			}
 			_ = os.Remove(dst_path)
 			if err := os.Symlink(header.Linkname, dst_path); err != nil {
+				if is_windows_symlink_privilege_error(err) {
+					warn_windows_symlink_privilege_once()
+					continue
+				}
 				return err
 			}
 		default:
@@ -2539,6 +2556,20 @@ func http_get(src_url string) (*http.Response, bool, error) {
 
 func looks_like_tls_verify_error(err error) bool {
 	return tls_error_rx.MatchString(err.Error())
+}
+
+func is_windows_symlink_privilege_error(err error) bool {
+	if err == nil || runtime.GOOS != "windows" {
+		return false
+	}
+	err_text := strings.ToLower(err.Error())
+	return strings.Contains(err_text, "privilege") || strings.Contains(err_text, "client")
+}
+
+func warn_windows_symlink_privilege_once() {
+	windows_symlink_privilege_warning.Do(func() {
+		fmt.Fprintln(os.Stderr, "warning: windows symlink privilege is unavailable, skipping symlink entries")
+	})
 }
 
 func has_suffix_fold(raw_value string, suffixes ...string) bool {
