@@ -75,3 +75,29 @@
 - for cli projects, the source of truth for testing is the executable interface, not internal language-level test structure; tests must be conceived and organized as cli black-box tests first
 
 - if you happens to needs tool that are not available in the current dev env to work better as XAgent, download them in a portable mode inside a project subfolder .agents_tools and use them, also track them in AGENTS_TOOLS.md for your convenience and future memory. anyway they shold never ever gets related to other aspects of the project only you XAgent can use them in prompt/rounds es. ripgrep (rg command), osquery, xmake or others
+
+- After every prompt-round, if local changes were made, always create a local git commit in the current branch.
+
+- If the repository has a configured GitHub remote and the `gh` CLI is authenticated, then after every significant user-facing or release-relevant change you must also:
+  
+  - push the current branch
+  - update the GitHub repository description if the project scope/message changed materially
+  - create or update a git tag for the new release
+  - create or update the corresponding GitHub Release
+  - mention in the final response exactly which push, tag, and release were created
+
+- A "significant user-facing or release-relevant change" includes at least:
+  
+  - new features
+  - new CLI flags
+  - behavior changes visible to XProjectUser
+  - support for new platforms/formats/protocols
+  - fixes to previously broken advertised features
+
+- Do not treat push/tag/release as optional in those cases.
+
+- If a GitHub remote is missing, or `gh` is not authenticated, or release creation fails, you must explicitly say so in the same prompt-round final response and report the exact blocking command/error.
+
+- If no significant user-facing or release-relevant change happened, do not create a tag or release.
+
+- Missing a required push/tag/release when the above conditions are met is a rule violation.
