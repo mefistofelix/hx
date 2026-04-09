@@ -71,3 +71,5 @@
 - prefer ubuntu linux distro both for wsl and github actions
 
 - prefer linux line ending for text, script and source files independently from the current dev env os, fallback to other line endings only if required
+
+- for cli projects, the source of truth for testing is the executable interface, not internal language-level test structure; tests must be conceived and organized as cli black-box tests first
