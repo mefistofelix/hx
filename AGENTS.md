@@ -22,7 +22,7 @@
 
 - Whenever final user facing behavior change is made, always update `README.md` to reflect it in a simple systehetized non redundant way in the best section available or create a new section, README.md reflects and documents for the final user the current features implemented in the project at the current stage of development
 
-- also update the github repo description if we are working ok a github repo with an updated and short description of the project when something changes
+- also after commit push and update the github repo description (with a catchy summary) and tag/trigger a release when something important changes and we have a github repo linked to the project
 
 - whenever a feature or code change it's significative keep the test suite updated
 
