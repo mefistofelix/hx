@@ -45,6 +45,17 @@ assert_file "$http_root/out/file.go"
 http_repeat_output="$(run_hx -strip 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "$http_root/out" 2>&1 || true)"
 assert_contains "$http_repeat_output" "already matches"
 
+tar_xz_root="$tests_cache_dir/cli/tar_xz"
+mkdir -p "$tar_xz_root/out"
+run_hx -strip 1 "https://raw.githubusercontent.com/glennrp/libpng-releases/master/libpng-1.6.34.tar.xz" "$tar_xz_root/out"
+assert_file "$tar_xz_root/out/README"
+
+zst_root="$tests_cache_dir/cli/zst"
+mkdir -p "$zst_root/out"
+run_hx "https://london.mirror.pkgbuild.com/core/os/x86_64/bash-5.3.9-1-x86_64.pkg.tar.zst" "$zst_root/out"
+assert_file "$zst_root/out/usr/bin/bash"
+assert_file "$zst_root/out/usr/share/doc/bash/README"
+
 github_root="$tests_cache_dir/cli/github"
 mkdir -p "$github_root/out"
 run_hx "https://github.com/go-git/go-billy" "$github_root/out"
