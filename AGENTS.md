@@ -74,4 +74,4 @@
 
 - for cli projects, the source of truth for testing is the executable interface, not internal language-level test structure; tests must be conceived and organized as cli black-box tests first
 
-- if you happens to needs tool that are not available in the current dev env to work better as XAgent, download them in a portable mode inside a project subfolder .agents_tools and use them, also track them in AGENTS_TOOLS.md for your convenience and future memory. anyway they shold never ever gets related to other aspects of the project only you XAgent can use them in prompt/rounds es. ripgrep, osquery, xmake or others
+- if you happens to needs tool that are not available in the current dev env to work better as XAgent, download them in a portable mode inside a project subfolder .agents_tools and use them, also track them in AGENTS_TOOLS.md for your convenience and future memory. anyway they shold never ever gets related to other aspects of the project only you XAgent can use them in prompt/rounds es. ripgrep (rg command), osquery, xmake or others
