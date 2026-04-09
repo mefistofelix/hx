@@ -60,3 +60,5 @@
 - for python runtime and package management always use uv https://github.com/astral-sh/uv
 
 - for javascript/typescript always use bun or deno as fallback if problems arises
+
+- less code lines always better then more code lines
