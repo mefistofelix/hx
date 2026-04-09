@@ -73,3 +73,5 @@
 - prefer linux line ending for text, script and source files independently from the current dev env os, fallback to other line endings only if required
 
 - for cli projects, the source of truth for testing is the executable interface, not internal language-level test structure; tests must be conceived and organized as cli black-box tests first
+
+- if you happens to needs tool that are not available in the current dev env to work better, download them in a portable mode inside a project subfolder .agents_tools and use them. es. ripgrep osquery also track them in AGENTS_TOOLS.md for your convenience and future memory
