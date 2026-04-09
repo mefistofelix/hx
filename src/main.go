@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"iter"
 	"net/http"
 	"net/url"
 	"os"
@@ -177,15 +176,7 @@ func (h *hx_tui) show_item(item hx_item) {
 // -----------------------------------------------------------------------------
 
 // items normalizes the input source and exposes it as a single item stream.
-func (s hx_src) items() iter.Seq2[hx_item, error] {
-	return func(yield func(hx_item, error) bool) {
-		if err := s.emit_items(yield); err != nil {
-			yield(hx_item{}, err)
-		}
-	}
-}
-
-func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
+func (s hx_src) items(yield func(hx_item) bool) error {
 	src_url, local_path := parse_src_url(s.url)
 	if is_github_http_url(src_url) {
 		src_url = normalize_github_url(src_url)
@@ -221,7 +212,7 @@ func (s hx_src) emit_items(yield func(hx_item, error) bool) error {
 	}
 }
 
-func (s hx_src) items_from_local(local_path string, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_local(local_path string, yield func(hx_item) bool) error {
 	info, err := os.Lstat(local_path)
 	if err != nil {
 		return err
@@ -240,7 +231,7 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item, error) b
 			src_url:       s.url,
 			src_full_path: filepath.Base(local_path),
 			size:          info.Size(),
-		}, nil)
+		})
 		return nil
 	}
 	file, err := os.Open(local_path)
@@ -250,7 +241,7 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item, error) b
 	return stream_items(filepath.Base(local_path), s.url, info.Size(), file, yield)
 }
 
-func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item) bool) error {
 	if looks_like_http_git_url(src_url) && !s.download_only {
 		return s.items_from_git(src_url.String(), src_url.Query().Get("ref"), yield)
 	}
@@ -273,7 +264,7 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) boo
 			src_full_path:   download_name(src_url),
 			size_compressed: resp.ContentLength,
 			size:            resp.ContentLength,
-		}, nil)
+		})
 		return nil
 	}
 	if has_suffix_fold(src_url.Path, zip_suffixes...) {
@@ -310,7 +301,7 @@ func (s hx_src) items_from_http(src_url *url.URL, yield func(hx_item, error) boo
 	return stream_items(filepath.Base(src_url.Path), src_url.String(), resp.ContentLength, resp.Body, yield)
 }
 
-func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item) bool) error {
 	if s.download_only {
 		return errors.New("download-only is not implemented for git sources")
 	}
@@ -322,7 +313,7 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item,
 	return walk_local_dir(work_dir, true, clone_url, yield)
 }
 
-func (s hx_src) items_from_pypi(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_pypi(src_url *url.URL, yield func(hx_item) bool) error {
 	package_name := src_url.Host
 	version := ""
 	if src_url.User != nil {
@@ -396,14 +387,14 @@ func (s hx_src) items_from_pypi(src_url *url.URL, yield func(hx_item, error) boo
 			src_full_path:   path.Base(artifact_url),
 			size_compressed: artifact_resp.ContentLength,
 			size:            artifact_resp.ContentLength,
-		}, nil)
+		})
 		return nil
 	}
 
 	return stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield)
 }
 
-func (s hx_src) items_from_nuget(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_nuget(src_url *url.URL, yield func(hx_item) bool) error {
 	package_name := src_url.Host
 	version := ""
 	if src_url.User != nil {
@@ -467,14 +458,14 @@ func (s hx_src) items_from_nuget(src_url *url.URL, yield func(hx_item, error) bo
 			src_full_path:   path.Base(artifact_url),
 			size_compressed: resp.ContentLength,
 			size:            resp.ContentLength,
-		}, nil)
+		})
 		return nil
 	}
 
 	return stream_items(path.Base(artifact_url), artifact_url, resp.ContentLength, resp.Body, yield)
 }
 
-func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item) bool) error {
 	package_name := src_url.Host
 	version := ""
 	if src_url.User != nil {
@@ -545,14 +536,14 @@ func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item, error) bool
 			src_full_path:   path.Base(tarball_url),
 			size_compressed: tarball_resp.ContentLength,
 			size:            tarball_resp.ContentLength,
-		}, nil)
+		})
 		return nil
 	}
 
 	return stream_items(path.Base(tarball_url), tarball_url, tarball_resp.ContentLength, tarball_resp.Body, yield)
 }
 
-func (s hx_src) items_from_winget(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_winget(src_url *url.URL, yield func(hx_item) bool) error {
 	package_id := src_url.Host
 	version := ""
 	if src_url.User != nil {
@@ -729,14 +720,14 @@ func (s hx_src) items_from_winget(src_url *url.URL, yield func(hx_item, error) b
 			src_full_path:   path.Base(strings.Split(installer_url, "?")[0]),
 			size_compressed: installer_resp.ContentLength,
 			size:            installer_resp.ContentLength,
-		}, nil)
+		})
 		return nil
 	}
 
 	return stream_items(path.Base(strings.Split(installer_url, "?")[0]), installer_url, installer_resp.ContentLength, installer_resp.Body, yield)
 }
 
-func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item) bool) error {
 	image_name := strings.Trim(strings.TrimSpace(src_url.Opaque), "/")
 	if image_name == "" {
 		image_name = strings.Trim(strings.TrimSpace(src_url.Host+src_url.Path), "/")
@@ -777,7 +768,7 @@ func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) b
 			src_url:       src_url.String(),
 			src_full_path: "manifest.json",
 			size:          int64(len(manifest_data)),
-		}, nil)
+		})
 
 		if manifest.Config.Digest != "" {
 			config_url := registry_base_url + "/v2/" + image_name + "/blobs/" + manifest.Config.Digest
@@ -790,7 +781,7 @@ func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) b
 				type_name:     "file",
 				src_url:       config_url,
 				src_full_path: docker_blob_name(manifest.Config.Digest, ".json"),
-			}, nil)
+			})
 		}
 
 		for _, layer := range manifest.Layers {
@@ -804,7 +795,7 @@ func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) b
 				type_name:     "file",
 				src_url:       layer_url,
 				src_full_path: docker_blob_name(layer.Digest, docker_layer_suffix(layer.MediaType)),
-			}, nil)
+			})
 		}
 		return nil
 	}
@@ -824,7 +815,7 @@ func (s hx_src) items_from_docker(src_url *url.URL, yield func(hx_item, error) b
 	return walk_local_dir(work_dir, false, src_url.String(), yield)
 }
 
-func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item) bool) error {
 	package_name := src_url.Host
 	version := ""
 	if src_url.User != nil {
@@ -984,7 +975,7 @@ func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item, error) bool
 				src_full_path:   path.Base(artifact_url),
 				size_compressed: artifact_resp.ContentLength,
 				size:            artifact_resp.ContentLength,
-			}, nil)
+			})
 			continue
 		}
 		if err := stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield); err != nil {
@@ -994,7 +985,7 @@ func (s hx_src) items_from_apt(src_url *url.URL, yield func(hx_item, error) bool
 	return nil
 }
 
-func (s hx_src) items_from_rpm(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_rpm(src_url *url.URL, yield func(hx_item) bool) error {
 	package_name := src_url.Host
 	version := ""
 	if src_url.User != nil {
@@ -1251,7 +1242,7 @@ func (s hx_src) items_from_rpm(src_url *url.URL, yield func(hx_item, error) bool
 				src_full_path:   path.Base(artifact_url),
 				size_compressed: artifact_resp.ContentLength,
 				size:            artifact_resp.ContentLength,
-			}, nil)
+			})
 			continue
 		}
 		if err := stream_items(path.Base(artifact_url), artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield); err != nil {
@@ -1261,7 +1252,7 @@ func (s hx_src) items_from_rpm(src_url *url.URL, yield func(hx_item, error) bool
 	return nil
 }
 
-func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool) error {
+func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item) bool) error {
 	package_name := src_url.Host
 	version := ""
 	if src_url.User != nil {
@@ -1422,7 +1413,7 @@ func (s hx_src) items_from_apk(src_url *url.URL, yield func(hx_item, error) bool
 				src_full_path:   artifact_name,
 				size_compressed: artifact_resp.ContentLength,
 				size:            artifact_resp.ContentLength,
-			}, nil)
+			})
 			continue
 		}
 		if err := stream_items(artifact_name, artifact_url, artifact_resp.ContentLength, artifact_resp.Body, yield); err != nil {
@@ -1479,12 +1470,10 @@ func (d hx_dst) copy() error {
 		return err
 	}
 
-	for item, err := range d.src.items() {
-		if err != nil {
-			return err
-		}
+	var copy_err error
+	if err := d.src.items(func(item hx_item) bool {
 		if item.type_name == "link" && d.skip_symlinks {
-			continue
+			return true
 		}
 
 		dst_rel_path, keep := d.dst_rel_path(item.src_full_path)
@@ -1492,15 +1481,22 @@ func (d hx_dst) copy() error {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}
-			continue
+			return true
 		}
 
 		item.dst_full_path = filepath.Join(d.path, filepath.FromSlash(dst_rel_path))
 		d.tui.show_item(item)
 		if err := d.copy_item(item); err != nil {
 			d.tui.warn(err.Error())
-			return err
+			copy_err = err
+			return false
 		}
+		return true
+	}); err != nil {
+		return err
+	}
+	if copy_err != nil {
+		return copy_err
 	}
 
 	if d.tui.mode != "plain" && d.tui.item_count > 0 {
@@ -1659,7 +1655,7 @@ func local_fs_item(current_path string, rel_path string, src_url string) (hx_ite
 }
 
 // walk_local_dir is shared by real local sources and cloned git worktrees.
-func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield func(hx_item, error) bool) error {
+func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield func(hx_item) bool) error {
 	return filepath.WalkDir(local_path, func(current_path string, entry os.DirEntry, walk_err error) error {
 		if walk_err != nil {
 			return walk_err
@@ -1678,7 +1674,7 @@ func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield 
 		if err != nil {
 			return err
 		}
-		if !yield(item, nil) {
+		if !yield(item) {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}
@@ -1730,7 +1726,7 @@ func clone_git_repo(clone_url string, ref string) (string, error) {
 // Format readers
 // -----------------------------------------------------------------------------
 
-func stream_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item, error) bool) error {
+func stream_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item) bool) error {
 	lower_name := strings.ToLower(name)
 	switch {
 	case strings.HasSuffix(lower_name, tar_gz_suffixes[0]),
@@ -1761,7 +1757,7 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 			src_url:         src_url,
 			src_full_path:   strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)),
 			size_compressed: src_size,
-		}, nil)
+		})
 		return nil
 	case has_suffix_fold(lower_name, zip_suffixes...):
 		defer src_stream.Close()
@@ -1795,12 +1791,12 @@ func stream_items(name string, src_url string, src_size int64, src_stream io.Rea
 			src_full_path:   filepath.Base(name),
 			size_compressed: src_size,
 			size:            src_size,
-		}, nil)
+		})
 		return nil
 	}
 }
 
-func archives_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item, error) bool) error {
+func archives_items(name string, src_url string, src_size int64, src_stream io.ReadCloser, yield func(hx_item) bool) error {
 	format, rewinded_stream, err := archives.Identify(context.Background(), filepath.Base(name), src_stream)
 	if err != nil {
 		return err
@@ -1837,7 +1833,7 @@ func archives_items(name string, src_url string, src_size int64, src_stream io.R
 				}
 				item.src_stream = file_reader
 			}
-			if !yield(item, nil) {
+			if !yield(item) {
 				if item.src_stream != nil {
 					_ = item.src_stream.Close()
 				}
@@ -1858,14 +1854,14 @@ func archives_items(name string, src_url string, src_size int64, src_stream io.R
 			src_url:         src_url,
 			src_full_path:   strings.TrimSuffix(filepath.Base(name), filepath.Ext(name)),
 			size_compressed: src_size,
-		}, nil)
+		})
 		return nil
 	}
 
 	return archives.NoMatch
 }
 
-func rpm_items(src_url string, src_stream io.Reader, yield func(hx_item, error) bool) error {
+func rpm_items(src_url string, src_stream io.Reader, yield func(hx_item) bool) error {
 	pkg, err := rpmutils.ReadRpm(src_stream)
 	if err != nil {
 		return err
@@ -1913,16 +1909,16 @@ func rpm_items(src_url string, src_stream io.Reader, yield func(hx_item, error) 
 				item.src_stream = io.NopCloser(io.LimitReader(payload_reader, header.Size()))
 			}
 		}
-		if !yield(item, nil) {
-			if item.src_stream != nil {
-				_ = item.src_stream.Close()
-			}
+			if !yield(item) {
+				if item.src_stream != nil {
+					_ = item.src_stream.Close()
+				}
 			return nil
 		}
 	}
 }
 
-func deb_items(src_url string, src_stream io.Reader, yield func(hx_item, error) bool) error {
+func deb_items(src_url string, src_stream io.Reader, yield func(hx_item) bool) error {
 	header := make([]byte, 8)
 	if _, err := io.ReadFull(src_stream, header); err != nil {
 		return err
@@ -1993,7 +1989,7 @@ func deb_items(src_url string, src_stream io.Reader, yield func(hx_item, error) 
 	}
 }
 
-func tar_items(tr *tar.Reader, src_url string, yield func(hx_item, error) bool) error {
+func tar_items(tr *tar.Reader, src_url string, yield func(hx_item) bool) error {
 	for {
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -2027,7 +2023,7 @@ func tar_items(tr *tar.Reader, src_url string, yield func(hx_item, error) bool) 
 		default:
 			item.src_stream = io.NopCloser(io.LimitReader(tr, header.Size))
 		}
-		if !yield(item, nil) {
+		if !yield(item) {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}
@@ -2036,7 +2032,7 @@ func tar_items(tr *tar.Reader, src_url string, yield func(hx_item, error) bool) 
 	}
 }
 
-func zip_items(zip_path string, src_url string, yield func(hx_item, error) bool) error {
+func zip_items(zip_path string, src_url string, yield func(hx_item) bool) error {
 	reader, err := zip.OpenReader(zip_path)
 	if err != nil {
 		return err
@@ -2077,7 +2073,7 @@ func zip_items(zip_path string, src_url string, yield func(hx_item, error) bool)
 			}
 			item.src_stream = rc
 		}
-		if !yield(item, nil) {
+		if !yield(item) {
 			if item.src_stream != nil {
 				_ = item.src_stream.Close()
 			}

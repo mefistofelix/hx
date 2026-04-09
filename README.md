@@ -42,6 +42,7 @@ hx [flags] <source> [dest]
 | `-target VALUE`, `-t VALUE` | auto | Select a repository-specific target such as distro release or framework |
 | `-quiet 0|1`, `-q 0|1` | `0` | Use plain output instead of the ANSI status line |
 | `-incexc RULES` | `:+` | Apply ordered include/exclude rules to extracted paths |
+| `-overwrite 0|1` | `1` | Replace existing destination entries instead of leaving them untouched |
 
 ## Behavior
 
