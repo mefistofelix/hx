@@ -7,18 +7,15 @@ set "BUILD_CACHE=%ROOT_DIR%\build_cache"
 set "GO_ROOT=%BUILD_CACHE%\go_sdk"
 set "GO_STAGE=%BUILD_CACHE%\go_stage"
 set "GO_EXE=%GO_ROOT%\bin\go.exe"
-set "GO_VERSION=1.25.0"
+set "GO_VERSION=1.26.2"
 set "ARCH=amd64"
 
 if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=arm64"
 
-if exist "%GO_EXE%" goto build
-where go >nul 2>nul
-if %ERRORLEVEL%==0 (
-    for /f "delims=" %%I in ('where go') do (
-        set "GO_EXE=%%I"
-        goto build
-    )
+if exist "%GO_EXE%" (
+    for /f "delims=" %%I in ('"%GO_EXE%" version') do set "GO_VERSION_TEXT=%%I %%J %%K"
+    echo %GO_VERSION_TEXT% | findstr /C:"go%GO_VERSION%" >nul
+    if %ERRORLEVEL%==0 goto build
 )
 
 if not exist "%BUILD_CACHE%" mkdir "%BUILD_CACHE%"

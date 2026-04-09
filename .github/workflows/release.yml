@@ -11,26 +11,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact_name: hx-linux-amd64
-            archive_name: hx-linux-amd64.tar.gz
-            binary_path: bin/hx
-            build_command: bash ./build.sh
-            test_command: bash ./test.sh
-            package_command: tar -czf "$ARCHIVE_NAME" -C bin hx
-          - os: windows-latest
-            artifact_name: hx-windows-amd64
-            archive_name: hx-windows-amd64.zip
-            binary_path: bin/hx.exe
-            build_command: cmd /c build.bat
-            test_command: cmd /c test.bat
-            package_command: tar -a -cf "$ARCHIVE_NAME" -C bin hx.exe
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     steps:
       - name: Clone repository
@@ -51,25 +32,48 @@ jobs:
         run: |
           set -euo pipefail
           cd repo
-          ${{ matrix.test_command }}
+          bash ./test.sh
 
-      - name: Build
+      - name: Build Linux
         shell: bash
         run: |
           set -euo pipefail
           cd repo
-          ${{ matrix.build_command }}
+          bash ./build.sh
 
-      - name: Package artifact
+      - name: Package Linux artifact
         shell: bash
         env:
-          ARCHIVE_NAME: ${{ matrix.archive_name }}
+          ARCHIVE_NAME: hx-linux-amd64.tar.gz
         run: |
           set -euo pipefail
           cd repo
-          ${{ matrix.package_command }}
+          tar -czf "$ARCHIVE_NAME" -C bin hx
 
-      - name: Upload release asset
+      - name: Build Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd repo
+          TARGET_OS=windows TARGET_ARCH=amd64 TARGET_BIN_PATH="$PWD/bin/hx.exe" bash ./build.sh
+
+      - name: Package Windows artifact
+        shell: bash
+        env:
+          ARCHIVE_NAME: hx-windows-amd64.zip
+        run: |
+          set -euo pipefail
+          cd repo
+          python3 - <<'PY'
+from pathlib import Path
+import zipfile
+archive = Path("hx-windows-amd64.zip")
+binary = Path("bin/hx.exe")
+with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    zf.write(binary, "hx.exe")
+PY
+
+      - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
@@ -78,4 +82,4 @@ jobs:
           set -euo pipefail
           cd repo
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes ""
-          gh release upload "$GITHUB_REF_NAME" "${{ matrix.archive_name }}" --clobber
+          gh release upload "$GITHUB_REF_NAME" "hx-linux-amd64.tar.gz" "hx-windows-amd64.zip" --clobber

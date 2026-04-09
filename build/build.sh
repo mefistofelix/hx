@@ -6,17 +6,13 @@ go_root="$root_dir/build_cache/go"
 go_bin="$go_root/bin/go"
 
 get_go_tool() {
-    if command -v go >/dev/null 2>&1; then
-        command -v go
-        return
-    fi
-    if [ -x "$go_bin" ]; then
+    version="1.26.2"
+    if [ -x "$go_bin" ] && "$go_bin" version | grep -q "go$version"; then
         printf '%s\n' "$go_bin"
         return
     fi
 
     mkdir -p "$root_dir/build_cache"
-    version="1.25.0"
     os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
     arch_name="$(uname -m)"
 
@@ -42,5 +38,13 @@ get_go_tool() {
 
 go_tool="$(get_go_tool)"
 mkdir -p "$root_dir/bin" "$root_dir/build_cache/gocache"
-GOCACHE="$root_dir/build_cache/gocache" "$go_tool" build -o "$root_dir/bin/hx" ./src
+target_os="${TARGET_OS:-}"
+target_arch="${TARGET_ARCH:-}"
+target_output="${TARGET_BIN_PATH:-$root_dir/bin/hx}"
 
+if [ -n "$target_os" ] || [ -n "$target_arch" ]; then
+    GOOS="${target_os:-$("$go_tool" env GOOS)}" GOARCH="${target_arch:-$("$go_tool" env GOARCH)}" GOCACHE="$root_dir/build_cache/gocache" "$go_tool" build -o "$target_output" ./src
+    exit 0
+fi
+
+GOCACHE="$root_dir/build_cache/gocache" "$go_tool" build -o "$target_output" ./src

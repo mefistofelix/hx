@@ -220,7 +220,7 @@ func TestRPMExtraction(t *testing.T) {
 	root_dir := t.TempDir()
 	dst_dir := filepath.Join(root_dir, "out")
 
-	run_hx(t, "-registry", "https://download.fedoraproject.org/pub/fedora/linux/releases", "-target", "41/Everything", "-platform", "linux/amd64", "rpm://jq", dst_dir)
+	run_hx(t, "-registry", "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases", "-target", "41/Everything", "-platform", "linux/amd64", "rpm://jq", dst_dir)
 
 	if _, err := os.Stat(filepath.Join(dst_dir, "usr", "bin", "jq")); err != nil {
 		t.Fatalf("expected jq binary, err=%v", err)

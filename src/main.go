@@ -97,8 +97,9 @@ var (
 	apt_default_registry = "https://deb.debian.org/debian"
 	apt_default_target   = "stable/main"
 	rpm_default_registry = "https://download.fedoraproject.org/pub/fedora/linux/releases"
-	rpm_default_target   = "41/Everything"
+	rpm_default_target   = "42/Everything"
 	winget_default_api   = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests"
+	winget_default_raw   = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests"
 	hex_hash_rx          = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	tls_error_rx         = regexp.MustCompile(`(?i)(x509:|certificate|tls:)`)
 	apt_dep_name_rx      = regexp.MustCompile(`[a-z0-9][a-z0-9+.-]*`)
@@ -624,29 +625,32 @@ func (s hx_src) items_from_winget(src_url *url.URL, yield func(hx_item, error) b
 		version = best_version
 	}
 
-	body, _, err := http_get_with_headers(registry_base_url+manifest_dir+"/"+version, map[string]string{"User-Agent": "hx"})
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-
-	entries := []github_content{}
-	if err := json.NewDecoder(body).Decode(&entries); err != nil {
-		return err
-	}
-
 	installer_manifest_url := ""
-	for _, entry := range entries {
-		if entry.Type != "file" || !strings.HasSuffix(strings.ToLower(entry.Name), ".yaml") {
-			continue
+	if s.registry_base_url == "" {
+		installer_manifest_url = winget_default_raw + manifest_dir + "/" + version + "/" + package_id + ".installer.yaml"
+	} else {
+		body, _, err := http_get_with_headers(registry_base_url+manifest_dir+"/"+version, map[string]string{"User-Agent": "hx"})
+		if err != nil {
+			return err
 		}
-		lower_name := strings.ToLower(entry.Name)
-		if strings.Contains(lower_name, ".installer.") || strings.HasSuffix(lower_name, ".installer.yaml") {
-			installer_manifest_url = entry.DownloadURL
-			break
+		defer body.Close()
+
+		entries := []github_content{}
+		if err := json.NewDecoder(body).Decode(&entries); err != nil {
+			return err
 		}
-		if installer_manifest_url == "" {
-			installer_manifest_url = entry.DownloadURL
+		for _, entry := range entries {
+			if entry.Type != "file" || !strings.HasSuffix(strings.ToLower(entry.Name), ".yaml") {
+				continue
+			}
+			lower_name := strings.ToLower(entry.Name)
+			if strings.Contains(lower_name, ".installer.") || strings.HasSuffix(lower_name, ".installer.yaml") {
+				installer_manifest_url = entry.DownloadURL
+				break
+			}
+			if installer_manifest_url == "" {
+				installer_manifest_url = entry.DownloadURL
+			}
 		}
 	}
 	if installer_manifest_url == "" {
