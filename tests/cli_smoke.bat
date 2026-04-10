@@ -52,8 +52,8 @@ if defined LINK_TEST_READY (
 set "CASE_DIR=%TESTS_CACHE%\http"
 mkdir "%CASE_DIR%\out" || exit /b 1
 "%HX_EXE%" -quiet -strip 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "%CASE_DIR%\out" || exit /b 1
-if not exist "%CASE_DIR%\out\file.go" (
-    echo test failed: missing file %CASE_DIR%\out\file.go
+if not exist "%CASE_DIR%\out\fs.go" (
+    echo test failed: missing file %CASE_DIR%\out\fs.go
     exit /b 1
 )
 "%HX_EXE%" -quiet -strip 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "%CASE_DIR%\out" || exit /b 1
@@ -84,6 +84,14 @@ mkdir "%CASE_DIR%\out" || exit /b 1
 "%HX_EXE%" -quiet "https://github.com/go-git/go-billy" "%CASE_DIR%\out" || exit /b 1
 if not exist "%CASE_DIR%\out\go.mod" (
     echo test failed: missing file %CASE_DIR%\out\go.mod
+    exit /b 1
+)
+
+set "CASE_DIR=%TESTS_CACHE%\github_release_zip"
+mkdir "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" -quiet "https://github.com/osquery/osquery/releases/download/5.22.1/osquery-5.22.1.windows_x86_64.zip" "%CASE_DIR%\out" || exit /b 1
+if not exist "%CASE_DIR%\out\osquery-5.22.1.windows_x86_64\Program Files\osquery\osqueryd\osqueryd.exe" (
+    echo test failed: missing file %CASE_DIR%\out\osquery-5.22.1.windows_x86_64\Program Files\osquery\osqueryd\osqueryd.exe
     exit /b 1
 )
 

@@ -2221,12 +2221,19 @@ func is_github_http_url(src_url *url.URL) bool {
 	if src_url.Scheme != "http" && src_url.Scheme != "https" {
 		return false
 	}
-	return strings.EqualFold(src_url.Hostname(), github_host)
+	if !strings.EqualFold(src_url.Hostname(), github_host) {
+		return false
+	}
+	parts := split_clean_path(src_url.Path)
+	if len(parts) == 2 {
+		return true
+	}
+	return len(parts) >= 4 && (parts[2] == "tree" || parts[2] == "commit")
 }
 
 func normalize_github_url(src_url *url.URL) *url.URL {
 	parts := split_clean_path(src_url.Path)
-	if len(parts) < 2 {
+	if len(parts) != 2 && !(len(parts) >= 4 && (parts[2] == "tree" || parts[2] == "commit")) {
 		return src_url
 	}
 	owner := parts[0]

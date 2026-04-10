@@ -17,7 +17,7 @@ hx [flags] <source> [dest]
 - `http://` and `https://` file/archive URLs
 - `http://` and `https://` Git repository URLs ending in `.git`
 - `git://` repository URLs
-- GitHub repository URLs such as `https://github.com/owner/repo`, `/tree/<ref>`, and `/commit/<sha>`
+- GitHub repository URLs only when the path is exactly `https://github.com/owner/repo` or `.../(tree|commit)/...`; other GitHub URLs such as release assets remain plain HTTP(S) archive/file URLs
 - `docker://image[:tag]` image sources
 - `pypi://package` and `pypi://package@version` sources
 - `nuget://package` and `nuget://package@version` sources
