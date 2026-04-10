@@ -69,6 +69,11 @@ mkdir -p "$github_root/out"
 run_hx "https://github.com/go-git/go-billy" "$github_root/out"
 assert_file "$github_root/out/go.mod"
 
+github_tree_root="$tests_cache_dir/cli/github_tree"
+mkdir -p "$github_tree_root/out"
+run_hx "https://github.com/go-git/go-billy/tree/master" "$github_tree_root/out"
+assert_file "$github_tree_root/out/go.mod"
+
 github_release_zip_root="$tests_cache_dir/cli/github_release_zip"
 mkdir -p "$github_release_zip_root/out"
 run_hx "https://github.com/osquery/osquery/releases/download/5.22.1/osquery-5.22.1.windows_x86_64.zip" "$github_release_zip_root/out"

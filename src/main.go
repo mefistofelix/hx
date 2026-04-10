@@ -1706,15 +1706,21 @@ func clone_git_repo(clone_url string, ref string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, err = git.PlainClone(work_dir, false, &git.CloneOptions{
+	clone_opts := &git.CloneOptions{
 		URL:      clone_url,
+		Depth:    1,
 		Progress: io.Discard,
-	})
+	}
+	if ref != "" && !hex_hash_rx.MatchString(ref) {
+		clone_opts.ReferenceName = plumbing.NewBranchReferenceName(ref)
+		clone_opts.SingleBranch = true
+	}
+	_, err = git.PlainClone(work_dir, false, clone_opts)
 	if err != nil {
 		os.RemoveAll(work_dir)
 		return "", err
 	}
-	if ref == "" {
+	if ref == "" || !hex_hash_rx.MatchString(ref) {
 		return work_dir, nil
 	}
 	repo, err := git.PlainOpen(work_dir)
@@ -1727,10 +1733,7 @@ func clone_git_repo(clone_url string, ref string) (string, error) {
 		os.RemoveAll(work_dir)
 		return "", err
 	}
-	checkout_opts := &git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(ref)}
-	if hex_hash_rx.MatchString(ref) {
-		checkout_opts = &git.CheckoutOptions{Hash: plumbing.NewHash(ref)}
-	}
+	checkout_opts := &git.CheckoutOptions{Hash: plumbing.NewHash(ref)}
 	if err := worktree.Checkout(checkout_opts); err != nil {
 		os.RemoveAll(work_dir)
 		return "", err

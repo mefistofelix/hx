@@ -50,7 +50,7 @@ hx [flags] <source> [dest]
 - archives are extracted into `dest`
 - additional archive/compression formats such as `.7z`, `.rar`, `.xz`, `.bz2`, `.zst`, `.lz4`, `.br`, and related single-file compressed variants are handled through `mholt/archives`
 - plain files are copied into `dest`
-- Git sources are cloned to a temporary worktree and copied without the `.git` directory
+- Git sources are cloned to a temporary shallow worktree with depth 1 and copied without the `.git` directory
 - `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`; with `-download-only`, it writes the manifest plus config/layer blobs instead
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact

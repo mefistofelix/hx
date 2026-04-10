@@ -87,6 +87,14 @@ if not exist "%CASE_DIR%\out\go.mod" (
     exit /b 1
 )
 
+set "CASE_DIR=%TESTS_CACHE%\github_tree"
+mkdir "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" -quiet "https://github.com/go-git/go-billy/tree/master" "%CASE_DIR%\out" || exit /b 1
+if not exist "%CASE_DIR%\out\go.mod" (
+    echo test failed: missing file %CASE_DIR%\out\go.mod
+    exit /b 1
+)
+
 set "CASE_DIR=%TESTS_CACHE%\github_release_zip"
 mkdir "%CASE_DIR%\out" || exit /b 1
 "%HX_EXE%" -quiet "https://github.com/osquery/osquery/releases/download/5.22.1/osquery-5.22.1.windows_x86_64.zip" "%CASE_DIR%\out" || exit /b 1
