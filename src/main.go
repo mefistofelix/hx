@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/mholt/archives"
@@ -53,6 +54,7 @@ type hx_dst struct {
 	skip_path_prefix int
 	skip_symlinks    bool
 	include_exclude  string
+	del_path         string
 	overwrite        bool
 	tui              *hx_tui
 }
@@ -1454,6 +1456,7 @@ func (d hx_dst) get_done_sentinel_path() string {
 		fmt.Sprintf("%d", d.skip_path_prefix),
 		fmt.Sprintf("%t", d.skip_symlinks),
 		d.include_exclude,
+		d.del_path,
 		fmt.Sprintf("%t", d.overwrite),
 	}, "\n")))
 	return filepath.Join(d.path, done_sentinel_prefix+hex.EncodeToString(sum[:16])+done_sentinel_suffix)
@@ -1468,6 +1471,7 @@ func (d hx_dst) set_done_sentinel(done bool) error {
 		"source":      d.src.url,
 		"written_at":  time.Now().UTC().Format(time.RFC3339),
 		"destination": d.path,
+		"del_path":    d.del_path,
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -1498,6 +1502,7 @@ func (d hx_dst) copy() error {
 			}
 			return true
 		}
+		dst_rel_path = d.rewrite_del_path(dst_rel_path)
 
 		item.dst_full_path = filepath.Join(d.path, filepath.FromSlash(dst_rel_path))
 		d.tui.show_item(item)
@@ -1535,6 +1540,10 @@ func (d hx_dst) dst_rel_path(src_full_path string) (string, bool) {
 	return strings.Join(filtered[d.skip_path_prefix:], "/"), true
 }
 
+func split_rule_list(raw_rules string) []string {
+	return strings.FieldsFunc(raw_rules, func(r rune) bool { return r == ',' || r == ';' })
+}
+
 // allow_item applies the ordered + / - rules after path stripping.
 func (d hx_dst) allow_item(rel_path string) bool {
 	rules := strings.TrimSpace(d.include_exclude)
@@ -1543,7 +1552,7 @@ func (d hx_dst) allow_item(rel_path string) bool {
 	}
 
 	allowed := false
-	for _, raw_rule := range strings.FieldsFunc(rules, func(r rune) bool { return r == ',' || r == ';' }) {
+	for _, raw_rule := range split_rule_list(rules) {
 		rule := strings.TrimSpace(raw_rule)
 		if len(rule) < 2 {
 			continue
@@ -1566,6 +1575,39 @@ func (d hx_dst) allow_item(rel_path string) bool {
 		}
 	}
 	return allowed
+}
+
+func (d hx_dst) rewrite_del_path(rel_path string) string {
+	patterns := strings.TrimSpace(d.del_path)
+	if patterns == "" {
+		return rel_path
+	}
+	rewritten_path := rel_path
+	for _, raw_pattern := range split_rule_list(patterns) {
+		pattern := strings.TrimSpace(raw_pattern)
+		if pattern == "" {
+			continue
+		}
+		if trimmed_path, ok := del_path_match(rewritten_path, pattern); ok {
+			rewritten_path = trimmed_path
+		}
+	}
+	return rewritten_path
+}
+
+func del_path_match(rel_path string, pattern string) (string, bool) {
+	parts := strings.Split(rel_path, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.Join(parts[i:], "/")
+		matched, err := doublestar.Match(pattern, candidate)
+		if err != nil {
+			return rel_path, false
+		}
+		if matched {
+			return candidate, true
+		}
+	}
+	return rel_path, false
 }
 
 func (d hx_dst) copy_item(item hx_item) error {
@@ -1928,10 +1970,10 @@ func rpm_items(src_url string, src_stream io.Reader, yield func(hx_item) bool) e
 				item.src_stream = io.NopCloser(io.LimitReader(payload_reader, header.Size()))
 			}
 		}
-			if !yield(item) {
-				if item.src_stream != nil {
-					_ = item.src_stream.Close()
-				}
+		if !yield(item) {
+			if item.src_stream != nil {
+				_ = item.src_stream.Close()
+			}
 			return nil
 		}
 	}
@@ -2624,6 +2666,7 @@ func main() {
 	flag.StringVar(&src.target, "target", "", "target override")
 	flag.StringVar(&src.target, "t", "", "target override")
 	flag.StringVar(&dst.include_exclude, "incexc", ":+", "include/exclude rules")
+	flag.StringVar(&dst.del_path, "delpath", "", "strip matching destination path prefixes after include/exclude filtering")
 	flag.Var(bool_flag{&keep_symlinks}, "symlinks", "keep symlinks when supported")
 	flag.Var(bool_flag{&src.download_only}, "download-only", "download without extraction")
 	flag.Var(bool_flag{&src.download_only}, "do", "download without extraction")
