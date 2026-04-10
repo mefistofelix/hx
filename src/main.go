@@ -2700,7 +2700,7 @@ func main() {
 		"-no-tempfile":   true,
 		"-quiet":         true,
 		"-q":             true,
-		"-overwrite":     true,
+		"-f":             true,
 	})...)
 
 	src := hx_src{}
@@ -2710,8 +2710,7 @@ func main() {
 	quiet := false
 	overwrite := true
 
-	flag.IntVar(&dst.skip_path_prefix, "strip", 0, "strip N leading path components")
-	flag.IntVar(&dst.skip_path_prefix, "skip", 0, "strip N leading path components")
+	flag.IntVar(&dst.skip_path_prefix, "delpathseg", 0, "drop N leading path segments from extracted entries")
 	flag.StringVar(&src.platform, "platform", runtime.GOOS+"/"+runtime.GOARCH, "target platform")
 	flag.StringVar(&src.platform, "plat", runtime.GOOS+"/"+runtime.GOARCH, "target platform")
 	flag.StringVar(&src.registry_base_url, "registry", "", "registry override")
@@ -2727,7 +2726,7 @@ func main() {
 	flag.Var(bool_flag{&src.force_no_tmp}, "no-tempfile", "avoid temp-file fallback")
 	flag.Var(bool_flag{&quiet}, "quiet", "plain output")
 	flag.Var(bool_flag{&quiet}, "q", "plain output")
-	flag.Var(bool_flag{&overwrite}, "overwrite", "overwrite files")
+	flag.Var(bool_flag{&overwrite}, "f", "overwrite files")
 	flag.Parse()
 
 	if quiet {

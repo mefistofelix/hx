@@ -33,7 +33,7 @@ hx [flags] <source> [dest]
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-strip N`, `-skip N` | `0` | Strip `N` leading path components from extracted entries |
+| `-delpathseg N` | `0` | Drop `N` leading path segments from extracted entries |
 | `-symlinks 0|1` | `1` | Preserve symlinks when the source provides them and the platform supports them |
 | `-download-only 0|1`, `-do 0|1` | `0` | Download or copy the source artifact without extraction; package and image sources may emit multiple files |
 | `-notmp 0|1`, `-no-tempfile 0|1` | `0` | Refuse the temp-file fallback used for HTTP ZIP extraction |
@@ -43,7 +43,7 @@ hx [flags] <source> [dest]
 | `-quiet 0|1`, `-q 0|1` | `0` | Use plain output instead of the ANSI status line |
 | `-incexc RULES` | `:+` | Apply ordered include/exclude rules to extracted paths |
 | `-repath GLOBS` | empty | After `-incexc`, keep only items whose destination path suffix matches one of the glob or doublestar patterns, and rewrite the destination path to that matching suffix |
-| `-overwrite 0|1` | `1` | Replace existing destination entries instead of leaving them untouched |
+| `-f 0|1` | `1` | Replace existing destination entries instead of leaving them untouched |
 
 ## Behavior
 
@@ -83,7 +83,7 @@ hx -registry https://download.fedoraproject.org/pub/fedora/linux/releases -targe
 hx -registry https://dl-cdn.alpinelinux.org/alpine -target v3.22/main -platform linux/amd64 apk://curl ./out
 hx -download-only https://example.com/file.zip ./downloads
 hx -repath '**/osqueryi*' https://github.com/osquery/osquery/releases/download/5.22.1/osquery-5.22.1.windows_x86_64.zip ./out
-hx -strip 1 ./sample.tar.gz ./out
+hx -delpathseg 1 ./sample.tar.gz ./out
 ```
 
 ## Build

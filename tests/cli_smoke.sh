@@ -58,14 +58,14 @@ run_hx "$link_root/src_link.txt" "$link_root/out"
 
 http_root="$tests_cache_dir/cli/http"
 mkdir -p "$http_root/out"
-run_hx -strip 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "$http_root/out"
+run_hx -delpathseg 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "$http_root/out"
 assert_file "$http_root/out/fs.go"
-http_repeat_output="$(run_hx -strip 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "$http_root/out" 2>&1 || true)"
+http_repeat_output="$(run_hx -delpathseg 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "$http_root/out" 2>&1 || true)"
 assert_contains "$http_repeat_output" "already matches"
 
 tar_xz_root="$tests_cache_dir/cli/tar_xz"
 mkdir -p "$tar_xz_root/out"
-run_hx -strip 1 "https://raw.githubusercontent.com/glennrp/libpng-releases/master/libpng-1.6.34.tar.xz" "$tar_xz_root/out"
+run_hx -delpathseg 1 "https://raw.githubusercontent.com/glennrp/libpng-releases/master/libpng-1.6.34.tar.xz" "$tar_xz_root/out"
 assert_file "$tar_xz_root/out/README"
 
 zst_root="$tests_cache_dir/cli/zst"
@@ -91,7 +91,7 @@ assert_file "$github_release_zip_root/out/osquery-5.22.1.windows_x86_64/Program 
 
 pypi_root="$tests_cache_dir/cli/pypi"
 mkdir -p "$pypi_root/out"
-run_hx -strip 1 "pypi://requests@2.32.3" "$pypi_root/out"
+run_hx -delpathseg 1 "pypi://requests@2.32.3" "$pypi_root/out"
 assert_file "$pypi_root/out/pyproject.toml"
 
 nuget_root="$tests_cache_dir/cli/nuget"
