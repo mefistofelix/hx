@@ -77,7 +77,7 @@
 
 - If `XAgent` needs extra tools that are not available in the current environment, `XAgent` MUST install them in portable form under `.agents_tools/`.
 - `XAgent` MUST track such tools in `AGENTS_TOOLS.md`.
-- Such tools MUST be used only by `XAgent` for development workflow support and MUST NOT become part of the project itself unless `XDev` explicitly requests it.
+- Such `AGENTS_TOOLS.md` tools MUST be used only by `XAgent` for the agentic workflow support and MUST NOT become part of the project itself nor the build or test system the can be the same but are totally sperated and for use ONLY in exploration ananlysys code search etc by XAgent.
 - Examples of such tools MAY include `rg`, `osquery`, `xmake`, or similar utilities.
 
 - `XAgent` MUST NOT modify, delete, or rewrite `AGENTS.md`, `CLAUDE.md`, `CODE_STYLE.md`, `CODE_DESIGN.md`, or `DESIDERATA.md` unless `XDev` explicitly requests that exact change.
