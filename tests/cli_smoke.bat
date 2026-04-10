@@ -22,18 +22,24 @@ if not exist "%CASE_DIR%\out\payload.txt" (
     exit /b 1
 )
 
-set "CASE_DIR=%TESTS_CACHE%\local_delpath"
+set "CASE_DIR=%TESTS_CACHE%\local_repath"
 mkdir "%CASE_DIR%\src\nested\deep" || exit /b 1
+mkdir "%CASE_DIR%\src\other" || exit /b 1
 mkdir "%CASE_DIR%\out" || exit /b 1
 > "%CASE_DIR%\src\nested\deep\payload.txt" echo rewrite
+> "%CASE_DIR%\src\other\keep.txt" echo skipme
 "%HX_EXE%" -quiet "%CASE_DIR%\src" "%CASE_DIR%\out" || exit /b 1
 if not exist "%CASE_DIR%\out\nested\deep\payload.txt" (
     echo test failed: missing file %CASE_DIR%\out\nested\deep\payload.txt
     exit /b 1
 )
-"%HX_EXE%" -quiet -delpath "**/payload*" "%CASE_DIR%\src" "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" -quiet -repath "**/payload*" "%CASE_DIR%\src" "%CASE_DIR%\out" || exit /b 1
 if not exist "%CASE_DIR%\out\payload.txt" (
     echo test failed: missing file %CASE_DIR%\out\payload.txt
+    exit /b 1
+)
+if exist "%CASE_DIR%\out\other\keep.txt" (
+    echo test failed: unexpected file %CASE_DIR%\out\other\keep.txt
     exit /b 1
 )
 

@@ -42,7 +42,7 @@ hx [flags] <source> [dest]
 | `-target VALUE`, `-t VALUE` | auto | Select a repository-specific target such as distro release or framework |
 | `-quiet 0|1`, `-q 0|1` | `0` | Use plain output instead of the ANSI status line |
 | `-incexc RULES` | `:+` | Apply ordered include/exclude rules to extracted paths |
-| `-delpath GLOBS` | empty | After `-incexc`, rewrite each destination path by dropping the longest leading prefix whose remaining suffix matches one of the glob or doublestar patterns |
+| `-repath GLOBS` | empty | After `-incexc`, keep only items whose destination path suffix matches one of the glob or doublestar patterns, and rewrite the destination path to that matching suffix |
 | `-overwrite 0|1` | `1` | Replace existing destination entries instead of leaving them untouched |
 
 ## Behavior
@@ -52,7 +52,7 @@ hx [flags] <source> [dest]
 - additional archive/compression formats such as `.7z`, `.rar`, `.xz`, `.bz2`, `.zst`, `.lz4`, `.br`, and related single-file compressed variants are handled through `mholt/archives`
 - plain files are copied into `dest`
 - Git sources are cloned to a temporary shallow worktree with depth 1 and copied without the `.git` directory
-- `-delpath` rewrites the final destination path after `-incexc`; for example `-delpath '**/osqueryi*'` turns `osquery-5.22.1.windows_x86_64/Program Files/osquery/osqueryi.exe` into `osqueryi.exe`
+- `-repath` filters and rewrites the final destination path after `-incexc`; for example `-repath '**/osqueryi*'` keeps `osquery-5.22.1.windows_x86_64/Program Files/osquery/osqueryi.exe` as `osqueryi.exe` and drops non-matching items
 - `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`; with `-download-only`, it writes the manifest plus config/layer blobs instead
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
@@ -82,7 +82,7 @@ hx -registry https://deb.debian.org/debian -target bookworm/main -platform linux
 hx -registry https://download.fedoraproject.org/pub/fedora/linux/releases -target 41/Everything -platform linux/amd64 rpm://jq ./out
 hx -registry https://dl-cdn.alpinelinux.org/alpine -target v3.22/main -platform linux/amd64 apk://curl ./out
 hx -download-only https://example.com/file.zip ./downloads
-hx -delpath '**/osqueryi*' https://github.com/osquery/osquery/releases/download/5.22.1/osquery-5.22.1.windows_x86_64.zip ./out
+hx -repath '**/osqueryi*' https://github.com/osquery/osquery/releases/download/5.22.1/osquery-5.22.1.windows_x86_64.zip ./out
 hx -strip 1 ./sample.tar.gz ./out
 ```
 

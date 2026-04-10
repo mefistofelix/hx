@@ -54,7 +54,7 @@ type hx_dst struct {
 	skip_path_prefix int
 	skip_symlinks    bool
 	include_exclude  string
-	del_path         string
+	repath           string
 	overwrite        bool
 	tui              *hx_tui
 }
@@ -1456,7 +1456,7 @@ func (d hx_dst) get_done_sentinel_path() string {
 		fmt.Sprintf("%d", d.skip_path_prefix),
 		fmt.Sprintf("%t", d.skip_symlinks),
 		d.include_exclude,
-		d.del_path,
+		d.repath,
 		fmt.Sprintf("%t", d.overwrite),
 	}, "\n")))
 	return filepath.Join(d.path, done_sentinel_prefix+hex.EncodeToString(sum[:16])+done_sentinel_suffix)
@@ -1471,7 +1471,7 @@ func (d hx_dst) set_done_sentinel(done bool) error {
 		"source":      d.src.url,
 		"written_at":  time.Now().UTC().Format(time.RFC3339),
 		"destination": d.path,
-		"del_path":    d.del_path,
+		"repath":      d.repath,
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -1490,6 +1490,7 @@ func (d hx_dst) copy() error {
 	}
 
 	var copy_err error
+	kept_paths := map[string]bool{}
 	if err := d.src.items(func(item hx_item) bool {
 		if item.type_name == "link" && d.skip_symlinks {
 			return true
@@ -1502,9 +1503,16 @@ func (d hx_dst) copy() error {
 			}
 			return true
 		}
-		dst_rel_path = d.rewrite_del_path(dst_rel_path)
+		dst_rel_path, keep = d.rewrite_repath(dst_rel_path)
+		if !keep {
+			if item.src_stream != nil {
+				_ = item.src_stream.Close()
+			}
+			return true
+		}
 
 		item.dst_full_path = filepath.Join(d.path, filepath.FromSlash(dst_rel_path))
+		kept_paths[dst_rel_path] = true
 		d.tui.show_item(item)
 		if err := d.copy_item(item); err != nil {
 			d.tui.warn(err.Error())
@@ -1517,6 +1525,9 @@ func (d hx_dst) copy() error {
 	}
 	if copy_err != nil {
 		return copy_err
+	}
+	if err := d.prune_destination(kept_paths); err != nil {
+		return err
 	}
 
 	if d.tui.mode != "plain" && d.tui.item_count > 0 {
@@ -1577,37 +1588,36 @@ func (d hx_dst) allow_item(rel_path string) bool {
 	return allowed
 }
 
-func (d hx_dst) rewrite_del_path(rel_path string) string {
-	patterns := strings.TrimSpace(d.del_path)
+func (d hx_dst) rewrite_repath(rel_path string) (string, bool) {
+	patterns := strings.TrimSpace(d.repath)
 	if patterns == "" {
-		return rel_path
+		return rel_path, true
 	}
-	rewritten_path := rel_path
 	for _, raw_pattern := range split_rule_list(patterns) {
 		pattern := strings.TrimSpace(raw_pattern)
 		if pattern == "" {
 			continue
 		}
-		if trimmed_path, ok := del_path_match(rewritten_path, pattern); ok {
-			rewritten_path = trimmed_path
+		if trimmed_path, ok := repath_match(rel_path, pattern); ok {
+			return trimmed_path, true
 		}
 	}
-	return rewritten_path
+	return "", false
 }
 
-func del_path_match(rel_path string, pattern string) (string, bool) {
+func repath_match(rel_path string, pattern string) (string, bool) {
 	parts := strings.Split(rel_path, "/")
 	for i := len(parts) - 1; i >= 0; i-- {
 		candidate := strings.Join(parts[i:], "/")
 		matched, err := doublestar.Match(pattern, candidate)
 		if err != nil {
-			return rel_path, false
+			return "", false
 		}
 		if matched {
 			return candidate, true
 		}
 	}
-	return rel_path, false
+	return "", false
 }
 
 func (d hx_dst) copy_item(item hx_item) error {
@@ -1669,6 +1679,49 @@ func (d hx_dst) copy_file(item hx_item) error {
 	defer out_file.Close()
 	_, err = io.Copy(out_file, item.src_stream)
 	return err
+}
+
+func (d hx_dst) prune_destination(kept_paths map[string]bool) error {
+	if strings.TrimSpace(d.repath) == "" {
+		return nil
+	}
+	keep_dirs := map[string]bool{"": true}
+	for rel_path := range kept_paths {
+		current_path := path.Dir(rel_path)
+		for current_path != "." && current_path != "" {
+			keep_dirs[current_path] = true
+			current_path = path.Dir(current_path)
+		}
+	}
+	return filepath.WalkDir(d.path, func(current_path string, entry os.DirEntry, walk_err error) error {
+		if walk_err != nil {
+			return walk_err
+		}
+		if current_path == d.path {
+			return nil
+		}
+		rel_path, err := filepath.Rel(d.path, current_path)
+		if err != nil {
+			return err
+		}
+		normalized_path := normalize_rel_path(rel_path)
+		if normalized_path == "" {
+			return nil
+		}
+		if entry.IsDir() {
+			if keep_dirs[normalized_path] {
+				return nil
+			}
+			if err := os.RemoveAll(current_path); err != nil {
+				return err
+			}
+			return filepath.SkipDir
+		}
+		if kept_paths[normalized_path] {
+			return nil
+		}
+		return os.Remove(current_path)
+	})
 }
 
 // -----------------------------------------------------------------------------
@@ -2666,7 +2719,7 @@ func main() {
 	flag.StringVar(&src.target, "target", "", "target override")
 	flag.StringVar(&src.target, "t", "", "target override")
 	flag.StringVar(&dst.include_exclude, "incexc", ":+", "include/exclude rules")
-	flag.StringVar(&dst.del_path, "delpath", "", "strip matching destination path prefixes after include/exclude filtering")
+	flag.StringVar(&dst.repath, "repath", "", "keep only matching destination suffixes after include/exclude filtering")
 	flag.Var(bool_flag{&keep_symlinks}, "symlinks", "keep symlinks when supported")
 	flag.Var(bool_flag{&src.download_only}, "download-only", "download without extraction")
 	flag.Var(bool_flag{&src.download_only}, "do", "download without extraction")
