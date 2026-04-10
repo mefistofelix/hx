@@ -1,5 +1,16 @@
 Internal Design
 
+The project must remain a CLI tool, but the core implementation may also be exposed as an importable Go package when needed for embedding.
+
+The minimal permitted source structure is:
+
+- `src/main.go` as the CLI entrypoint
+- `src/hx/hx.go` as the importable implementation package
+
+`src/main.go` must stay thin and should delegate execution to the importable package.
+
+The importable package should expose a single high-level entrypoint that keeps the CLI behavior available to embedders without forcing subprocess execution.
+
 ```Pseudo
 struct hx_src {
     url: string //supports url with variuos schemas and local paths: examples /file.zip ./file.zip file:///file.zip docker://busybox:1.36.1 https://github.com/golang/example 

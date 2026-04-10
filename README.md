@@ -29,6 +29,18 @@ hx [flags] <source> [dest]
 
 `dest` defaults to the current directory.
 
+## Embedding
+
+`hx` now also exposes an importable Go package at `hx/src/hx`.
+
+The package keeps the CLI behavior available through a single high-level entrypoint:
+
+```go
+exit_code := hx.Main(args, stdout, stderr)
+```
+
+This is intended for projects that want to reuse `hx` in-process instead of spawning the `hx` executable as a subprocess.
+
 ## Flags
 
 | Flag | Default | Description |
