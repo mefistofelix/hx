@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
 
     steps:
@@ -33,6 +33,23 @@ jobs:
           set -euo pipefail
           cd repo
           bash ./test.sh
+
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh repo clone "$GITHUB_REPOSITORY" repo -- --depth=1
+          cd repo
+          if [ -n "${GITHUB_REF_NAME:-}" ]; then
+            git fetch --depth=1 origin "$GITHUB_REF_NAME" || true
+            git checkout "$GITHUB_REF_NAME" || true
+          fi
 
       - name: Build Linux
         shell: bash
