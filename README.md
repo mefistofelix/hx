@@ -128,7 +128,7 @@ chmod +x build.sh && ./build.sh
 
 Build outputs are written to `bin/`.
 
-Tagged GitHub Releases include `hx-windows-amd64.zip` and `hx-linux-amd64.tar.gz`.
+Tagged GitHub Releases include the direct executables `hx-windows-amd64.exe` and `hx-linux-amd64`.
 
 ## Test
 
