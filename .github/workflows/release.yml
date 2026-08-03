@@ -74,4 +74,4 @@ jobs:
           set -euo pipefail
           cd repo
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes ""
-          gh release upload "$GITHUB_REF_NAME" "bin/hx#hx-linux-amd64" "bin/hx.exe#hx-windows-amd64.exe" --clobber
+          gh release upload "$GITHUB_REF_NAME" bin/hx bin/hx.exe --clobber
