@@ -31,6 +31,10 @@ hx [flags] <source> [dest]
 
 Running `hx` without a source prints a short example for every supported source scheme. Invalid flags, source URLs, and source-specific arguments exit with a readable `error:` message instead of a stack trace.
 
+### npm submodules
+
+Use `npm://package/submodule` for a scoped npm platform submodule. `hx` resolves it as `@package/submodule`; for example, `npm://prebuilt-tdlib/win32-x64` resolves and extracts `@prebuilt-tdlib/win32-x64`.
+
 ## Embedding
 
 `hx` now also exposes an importable Go package at `hx/src/hx`.
@@ -73,6 +77,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 - `nuget://` resolves the package from the flat-container API and extracts or downloads the `.nupkg` artifact
 - `winget://` resolves package manifests from the public `winget-pkgs` repository, selects a matching installer for the requested architecture, then downloads or extracts that installer artifact
 - `npm://` resolves the package metadata and extracts or downloads the published tarball for the selected version
+- npm submodule aliases resolve to their scoped package before the same metadata and tarball flow
 - `apt://` fetches `Packages.gz`, resolves the selected package plus `Depends` and `Pre-Depends` for the requested distribution target and arch, then extracts or downloads the `.deb` artifacts
 - `rpm://` fetches `repomd.xml` plus `primary.xml.gz`, resolves the selected package plus matching providers for `Requires`, then extracts or downloads the `.rpm` artifacts
 - `apk://` fetches `APKINDEX.tar.gz`, resolves the selected package plus dependency providers for the requested repo and arch, then extracts or downloads the `.apk` artifacts
