@@ -22,7 +22,7 @@ hx [flags] <source> [dest]
 - `pypi://package` and `pypi://package@version` sources
 - `nuget://package` and `nuget://package@version` sources
 - `winget://Package.Identifier` and `winget://Package.Identifier@version` sources
-- `npm://package` and `npm://package@version` sources for non-scoped packages
+- `npm://package` and `npm://package@version` sources, plus `npm://package/submodule` aliases for scoped platform submodules such as `npm://prebuilt-tdlib/win32-x64`
 - `apt://package` and `apt://package@version` sources
 - `rpm://package` and `rpm://package@version` sources
 - `apk://package` and `apk://package@version` sources
@@ -90,6 +90,7 @@ hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out
 hx winget://Git.Git@2.46.0 ./out
 hx -registry https://registry.npmjs.org npm://lodash@4.17.21 ./out
+hx npm://prebuilt-tdlib/win32-x64 ./out
 hx -registry https://deb.debian.org/debian -target bookworm/main -platform linux/amd64 apt://curl ./out
 hx -registry https://download.fedoraproject.org/pub/fedora/linux/releases -target 41/Everything -platform linux/amd64 rpm://jq ./out
 hx -registry https://dl-cdn.alpinelinux.org/alpine -target v3.22/main -platform linux/amd64 apk://curl ./out

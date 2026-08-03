@@ -157,6 +157,14 @@ if not exist "%CASE_DIR%\out\package\package.json" (
     exit /b 1
 )
 
+set "CASE_DIR=%TESTS_CACHE%\npm_submodule"
+mkdir "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" -quiet "npm://prebuilt-tdlib/win32-x64" "%CASE_DIR%\out" || exit /b 1
+if not exist "%CASE_DIR%\out\package\tdjson.dll" (
+    echo test failed: missing file %CASE_DIR%\out\package\tdjson.dll
+    exit /b 1
+)
+
 set "CASE_DIR=%TESTS_CACHE%\docker"
 mkdir "%CASE_DIR%\out" || exit /b 1
 "%HX_EXE%" -quiet -platform "linux/amd64" "docker://busybox:1.36.1" "%CASE_DIR%\out" || exit /b 1

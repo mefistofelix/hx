@@ -492,6 +492,12 @@ func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item) bool) error
 		package_name = src_url.User.Username()
 		version = src_url.Host
 	}
+	if submodule_name := strings.Trim(src_url.Path, "/"); submodule_name != "" {
+		if package_name == "" || package_name == "." || strings.HasPrefix(package_name, "@") {
+			return errors.New("npm submodule source requires an unscoped package name")
+		}
+		package_name = "@" + package_name + "/" + submodule_name
+	}
 	if package_name == "" || package_name == "." {
 		return errors.New("npm source requires a package name")
 	}
@@ -501,7 +507,7 @@ func (s hx_src) items_from_npm(src_url *url.URL, yield func(hx_item) bool) error
 		registry_base_url = "https://registry.npmjs.org"
 	}
 
-	metadata_url := registry_base_url + "/" + package_name
+	metadata_url := registry_base_url + "/" + url.PathEscape(package_name)
 	resp, insecure_retry, err := http_get(metadata_url)
 	if err != nil {
 		return err
