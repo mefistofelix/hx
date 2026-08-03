@@ -1661,7 +1661,11 @@ func (d hx_dst) get_done_sentinel_path() string {
 		d.repath,
 		fmt.Sprintf("%t", d.overwrite),
 	}, "\n")))
-	return filepath.Join(d.path, done_sentinel_prefix+hex.EncodeToString(sum[:16])+done_sentinel_suffix)
+	sentinel_name := done_sentinel_prefix + hex.EncodeToString(sum[:16]) + done_sentinel_suffix
+	if info, err := os.Stat(d.path); err == nil && !info.IsDir() {
+		return filepath.Join(filepath.Dir(d.path), sentinel_name)
+	}
+	return filepath.Join(d.path, sentinel_name)
 }
 
 func (d hx_dst) set_done_sentinel(done bool) error {
@@ -1687,7 +1691,32 @@ func (d hx_dst) copy() error {
 		d.tui.warn("destination already matches the same source/options, skipping")
 		return nil
 	}
-	if err := os.MkdirAll(d.path, 0o755); err != nil {
+
+	src_url, local_path := parse_src_url(d.src.url)
+	plain_file_source := false
+	source_name := src_url.Path
+	if src_url.Scheme == "" || src_url.Scheme == "file" {
+		info, err := os.Lstat(local_path)
+		plain_file_source = err == nil && !info.IsDir()
+		source_name = local_path
+	} else if src_url.Scheme == "http" || src_url.Scheme == "https" {
+		plain_file_source = !looks_like_http_git_url(src_url) && !is_github_http_url(src_url)
+	}
+	if plain_file_source && !d.src.download_only {
+		plain_file_source = !has_suffix_fold(source_name, tar_gz_suffixes...) &&
+			!has_suffix_fold(source_name, tar_suffix, gzip_suffix, apk_suffix, deb_suffix, rpm_suffix) &&
+			!has_suffix_fold(source_name, zip_suffixes...) &&
+			!has_suffix_fold(source_name, archives_suffixes...)
+	}
+	dest_is_file := plain_file_source
+	if info, err := os.Stat(d.path); err == nil && info.IsDir() {
+		dest_is_file = false
+	}
+	dest_root := d.path
+	if dest_is_file {
+		dest_root = filepath.Dir(d.path)
+	}
+	if err := os.MkdirAll(dest_root, 0o755); err != nil {
 		return err
 	}
 
@@ -1714,6 +1743,9 @@ func (d hx_dst) copy() error {
 		}
 
 		item.dst_full_path = filepath.Join(d.path, filepath.FromSlash(dst_rel_path))
+		if dest_is_file {
+			item.dst_full_path = d.path
+		}
 		kept_paths[dst_rel_path] = true
 		if err := d.copy_item(item); err != nil {
 			d.tui.warn(err.Error())

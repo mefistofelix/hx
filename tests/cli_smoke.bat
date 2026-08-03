@@ -32,6 +32,19 @@ if not exist "%CASE_DIR%\out\payload.txt" (
     exit /b 1
 )
 
+set "CASE_DIR=%TESTS_CACHE%\local_file_dest"
+mkdir "%CASE_DIR%" || exit /b 1
+> "%CASE_DIR%\payload.txt" echo renamed
+"%HX_EXE%" -quiet "%CASE_DIR%\payload.txt" "%CASE_DIR%\renamed.txt" || exit /b 1
+if not exist "%CASE_DIR%\renamed.txt" (
+    echo test failed: missing file %CASE_DIR%\renamed.txt
+    exit /b 1
+)
+if exist "%CASE_DIR%\renamed.txt\payload.txt" (
+    echo test failed: file destination became a directory
+    exit /b 1
+)
+
 set "CASE_DIR=%TESTS_CACHE%\local_repath"
 mkdir "%CASE_DIR%\src\nested\deep" || exit /b 1
 mkdir "%CASE_DIR%\src\other" || exit /b 1
@@ -89,6 +102,18 @@ if not exist "%CASE_DIR%\out\fs.go" (
     exit /b 1
 )
 "%HX_EXE%" -quiet -delpathseg 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "%CASE_DIR%\out" || exit /b 1
+
+set "CASE_DIR=%TESTS_CACHE%\http_file_dest"
+mkdir "%CASE_DIR%" || exit /b 1
+"%HX_EXE%" -quiet "https://raw.githubusercontent.com/go-git/go-billy/master/LICENSE" "%CASE_DIR%\license.txt" || exit /b 1
+if not exist "%CASE_DIR%\license.txt" (
+    echo test failed: missing file %CASE_DIR%\license.txt
+    exit /b 1
+)
+if exist "%CASE_DIR%\license.txt\LICENSE" (
+    echo test failed: HTTP file destination became a directory
+    exit /b 1
+)
 
 set "CASE_DIR=%TESTS_CACHE%\tar_xz"
 mkdir "%CASE_DIR%\out" || exit /b 1

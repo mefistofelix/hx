@@ -27,7 +27,7 @@ hx [flags] <source> [dest]
 - `rpm://package` and `rpm://package@version` sources
 - `apk://package` and `apk://package@version` sources
 
-`dest` defaults to the current directory.
+`dest` defaults to the current directory. For a plain single-file source, a non-existing `dest` is the exact output file path; an existing destination directory still receives the file under its source name.
 
 Running `hx` without a source prints a short example for every supported source scheme. Invalid flags, source URLs, and source-specific arguments exit with a readable `error:` message instead of a stack trace.
 
@@ -69,7 +69,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 - local directories are copied recursively
 - archives are extracted into `dest`
 - additional archive/compression formats such as `.7z`, `.rar`, `.xz`, `.bz2`, `.zst`, `.lz4`, `.br`, and related single-file compressed variants are handled through `mholt/archives`
-- plain files are copied into `dest`
+- plain single-file sources use a non-existing `dest` as the exact output file path; when `dest` is an existing directory, the source filename is preserved inside it
 - generic Git sources fetch the selected shallow revision into an in-memory bare object store and write its tree directly to `dest`, without a `.git` directory or temporary worktree
 - `github://owner/repository` downloads the requested branch or commit as a streaming tarball and removes GitHub's wrapper directory; use `?ref=branch-or-commit` to select a revision
 - if the GitHub archive cannot be downloaded or extracted, `hx` warns on stderr and automatically falls back to a shallow Git checkout of the same revision
@@ -85,7 +85,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 - `rpm://` fetches `repomd.xml` plus `primary.xml.gz`, resolves the selected package plus matching providers for `Requires`, then extracts or downloads the `.rpm` artifacts
 - `apk://` fetches `APKINDEX.tar.gz`, resolves the selected package plus dependency providers for the requested repo and arch, then extracts or downloads the `.apk` artifacts
 - if HTTPS certificate verification fails, `hx` warns and retries insecurely
-- successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
+- successful runs write a sentinel file in `dest`, or next to an exact file destination; the same source/options combination is skipped on the next run
 - successful files and links are printed as destination paths, one per line; directories, byte counters, item counters, and Git progress are not printed
 
 ## Examples
@@ -93,6 +93,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 ```sh
 hx ./sample.zip ./out
 hx ./folder ./out
+hx https://example.com/tool.exe ./tool.exe
 hx https://example.com/project.tar.gz ./out
 hx https://example.com/project.git ./out
 hx https://github.com/go-git/go-billy ./out

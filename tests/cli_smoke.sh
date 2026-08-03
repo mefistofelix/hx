@@ -43,6 +43,13 @@ printf 'plain\n' >"$local_root/payload.txt"
 run_hx -q 1 -symlinks 0 "$local_root/payload.txt" "$local_root/out"
 assert_file "$local_root/out/payload.txt"
 
+local_file_dest_root="$tests_cache_dir/cli/local_file_dest"
+mkdir -p "$local_file_dest_root"
+printf 'renamed\n' >"$local_file_dest_root/payload.txt"
+run_hx "$local_file_dest_root/payload.txt" "$local_file_dest_root/renamed.txt"
+assert_file "$local_file_dest_root/renamed.txt"
+[ ! -d "$local_file_dest_root/renamed.txt" ] || fail "file destination became a directory"
+
 local_repath_root="$tests_cache_dir/cli/local_repath"
 mkdir -p "$local_repath_root/src/nested/deep" "$local_repath_root/src/other" "$local_repath_root/out"
 printf 'rewrite\n' >"$local_repath_root/src/nested/deep/payload.txt"
@@ -67,6 +74,12 @@ run_hx -delpathseg 1 "https://github.com/go-git/go-billy/archive/refs/heads/mast
 assert_file "$http_root/out/fs.go"
 http_repeat_output="$(run_hx -delpathseg 1 "https://github.com/go-git/go-billy/archive/refs/heads/master.tar.gz" "$http_root/out" 2>&1 || true)"
 assert_contains "$http_repeat_output" "already matches"
+
+http_file_dest_root="$tests_cache_dir/cli/http_file_dest"
+mkdir -p "$http_file_dest_root"
+run_hx "https://raw.githubusercontent.com/go-git/go-billy/master/LICENSE" "$http_file_dest_root/license.txt"
+assert_file "$http_file_dest_root/license.txt"
+[ ! -d "$http_file_dest_root/license.txt" ] || fail "HTTP file destination became a directory"
 
 tar_xz_root="$tests_cache_dir/cli/tar_xz"
 mkdir -p "$tar_xz_root/out"
