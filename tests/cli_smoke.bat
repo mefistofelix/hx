@@ -135,6 +135,18 @@ findstr /C:"items=" /C:"bytes=" /B /C:"file " "%CASE_DIR%\output.txt" >nul && (
     exit /b 1
 )
 
+set "CASE_DIR=%TESTS_CACHE%\github_recursive"
+mkdir "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" --recursive "github://ngtcp2/ngtcp2" "%CASE_DIR%\out" > "%CASE_DIR%\output.txt" || exit /b 1
+if not exist "%CASE_DIR%\out\tests\munit\munit.c" (
+    echo test failed: missing recursive submodule file %CASE_DIR%\out\tests\munit\munit.c
+    exit /b 1
+)
+if not exist "%CASE_DIR%\out\third-party\urlparse\http-parser\http_parser.c" (
+    echo test failed: missing nested recursive submodule file %CASE_DIR%\out\third-party\urlparse\http-parser\http_parser.c
+    exit /b 1
+)
+
 set "CASE_DIR=%TESTS_CACHE%\github_tree"
 mkdir "%CASE_DIR%\out" || exit /b 1
 "%HX_EXE%" -quiet "https://github.com/go-git/go-billy/tree/master" "%CASE_DIR%\out" || exit /b 1

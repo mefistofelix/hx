@@ -93,6 +93,12 @@ case "$github_schema_output" in
     *"items="*|*"bytes="*|"file "*) fail "github output contains status counters or item types" ;;
 esac
 
+github_recursive_root="$tests_cache_dir/cli/github_recursive"
+mkdir -p "$github_recursive_root/out"
+run_hx --recursive "github://ngtcp2/ngtcp2" "$github_recursive_root/out" >"$github_recursive_root/output.txt"
+assert_file "$github_recursive_root/out/tests/munit/munit.c"
+assert_file "$github_recursive_root/out/third-party/urlparse/http-parser/http_parser.c"
+
 github_tree_root="$tests_cache_dir/cli/github_tree"
 mkdir -p "$github_tree_root/out"
 run_hx "https://github.com/go-git/go-billy/tree/master" "$github_tree_root/out"

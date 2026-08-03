@@ -59,6 +59,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 | `-registry VALUE`, `-reg VALUE` | auto | Override the registry or repository base for supported source types |
 | `-target VALUE`, `-t VALUE` | auto | Select a repository-specific target such as distro release or framework |
 | `-quiet 0|1`, `-q 0|1` | `0` | Retained for compatibility; normal output is always one destination file path per line |
+| `--recursive 0|1` | `0` | Include Git submodules recursively for GitHub sources |
 | `-incexc RULES` | `:+` | Apply ordered include/exclude rules to extracted paths |
 | `-repath GLOBS` | empty | After `-incexc`, keep only items whose destination path suffix matches one of the glob or doublestar patterns, and rewrite the destination path to that matching suffix |
 | `-f 0|1` | `1` | Replace existing destination entries instead of leaving them untouched |
@@ -72,6 +73,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 - generic Git sources fetch the selected shallow revision into an in-memory bare object store and write its tree directly to `dest`, without a `.git` directory or temporary worktree
 - `github://owner/repository` downloads the requested branch or commit as a streaming tarball and removes GitHub's wrapper directory; use `?ref=branch-or-commit` to select a revision
 - if the GitHub archive cannot be downloaded or extracted, `hx` warns on stderr and automatically falls back to a shallow Git checkout of the same revision
+- `--recursive` is opt-in and uses the existing `go-git` implementation to read `.gitmodules` and each gitlink commit recursively, without GitHub APIs or temporary worktrees
 - `-repath` filters and rewrites the final destination path after `-incexc`; for example `-repath '**/osqueryi*'` keeps `osquery-5.22.1.windows_x86_64/Program Files/osquery/osqueryi.exe` as `osqueryi.exe` and drops non-matching items
 - `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`; with `-download-only`, it writes the manifest plus config/layer blobs instead
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
@@ -97,6 +99,7 @@ hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
 hx github://go-git/go-billy ./out
 hx 'github://true-async/php-src?ref=master' ./php-src
+hx --recursive github://ngtcp2/ngtcp2 ./ngtcp2
 hx docker://busybox:latest ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out

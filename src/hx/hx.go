@@ -29,8 +29,10 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	git "github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
+	gitobject "github.com/go-git/go-git/v5/plumbing/object"
 	gitmemory "github.com/go-git/go-git/v5/storage/memory"
 	"github.com/mholt/archives"
 	rpmutils "github.com/sassoftware/go-rpmutils"
@@ -215,6 +217,9 @@ func (s hx_src) items(yield func(hx_item) bool) error {
 		if err != nil {
 			return err
 		}
+		if src_url.Query().Get("recursive") == "1" {
+			return s.items_from_git_revision(clone_url, src_url.Query().Get("ref"), "", true, map[string]bool{}, yield)
+		}
 		if s.download_only {
 			return s.items_from_http(archive_url, yield)
 		}
@@ -356,23 +361,54 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item)
 	if s.download_only {
 		return errors.New("download-only is not implemented for git sources")
 	}
-	clone_opts := &git.CloneOptions{
-		URL:      clone_url,
-		Depth:    1,
-		Progress: io.Discard,
+	return s.items_from_git_revision(clone_url, ref, "", false, map[string]bool{}, yield)
+}
+
+func (s hx_src) items_from_git_revision(clone_url string, ref string, dst_prefix string, recursive bool, active_revisions map[string]bool, yield func(hx_item) bool) error {
+	revision_key := clone_url + "@" + ref
+	if active_revisions[revision_key] {
+		return fmt.Errorf("recursive git submodule cycle detected at %s", revision_key)
 	}
-	if ref != "" && !hex_hash_rx.MatchString(ref) {
-		clone_opts.ReferenceName = plumbing.NewBranchReferenceName(ref)
-		clone_opts.SingleBranch = true
-	}
-	repo, err := git.Clone(gitmemory.NewStorage(), nil, clone_opts)
-	if err != nil {
-		return err
-	}
+	active_revisions[revision_key] = true
+	defer delete(active_revisions, revision_key)
+
+	storage := gitmemory.NewStorage()
+	var repo *git.Repository
 	commit_hash := plumbing.ZeroHash
+	var err error
 	if ref != "" && hex_hash_rx.MatchString(ref) {
+		repo, err = git.Init(storage, nil)
+		if err != nil {
+			return err
+		}
+		remote, err := repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{clone_url}})
+		if err != nil {
+			return err
+		}
+		fetched_ref := plumbing.ReferenceName("refs/hx/fetched")
+		refspec := gitconfig.RefSpec("+" + ref + ":" + fetched_ref.String())
+		if err := remote.Fetch(&git.FetchOptions{
+			RefSpecs: []gitconfig.RefSpec{refspec},
+			Depth:    1,
+			Tags:     git.NoTags,
+		}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+			return err
+		}
 		commit_hash = plumbing.NewHash(ref)
 	} else {
+		clone_opts := &git.CloneOptions{
+			URL:      clone_url,
+			Depth:    1,
+			Progress: io.Discard,
+		}
+		if ref != "" {
+			clone_opts.ReferenceName = plumbing.NewBranchReferenceName(ref)
+			clone_opts.SingleBranch = true
+		}
+		repo, err = git.Clone(storage, nil, clone_opts)
+		if err != nil {
+			return err
+		}
 		head, err := repo.Head()
 		if err != nil {
 			return err
@@ -392,7 +428,7 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item)
 	for {
 		file, err := files.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			break
 		}
 		if err != nil {
 			return err
@@ -403,7 +439,7 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item)
 		item := hx_item{
 			type_name:      "file",
 			src_url:        clone_url,
-			src_full_path:  file.Name,
+			src_full_path:  path.Join(dst_prefix, file.Name),
 			size_extracted: file.Size,
 			size:           file.Size,
 		}
@@ -426,6 +462,66 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item)
 				_ = item.src_stream.Close()
 			}
 			return nil
+		}
+	}
+	if !recursive {
+		return nil
+	}
+
+	modules_file, err := tree.File(".gitmodules")
+	if errors.Is(err, gitobject.ErrFileNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	modules_data, err := modules_file.Contents()
+	if err != nil {
+		return err
+	}
+	modules := gitconfig.NewModules()
+	if err := modules.Unmarshal([]byte(modules_data)); err != nil {
+		return fmt.Errorf("invalid .gitmodules: %w", err)
+	}
+	walker := gitobject.NewTreeWalker(tree, true, nil)
+	defer walker.Close()
+	for {
+		entry_path, entry, err := walker.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if entry.Mode != filemode.Submodule {
+			continue
+		}
+		var module_url string
+		for _, module := range modules.Submodules {
+			if normalize_rel_path(module.Path) == normalize_rel_path(entry_path) {
+				module_url = strings.TrimSpace(module.URL)
+				break
+			}
+		}
+		if module_url == "" {
+			return fmt.Errorf("missing .gitmodules URL for %s", entry_path)
+		}
+		if strings.HasPrefix(module_url, "git@github.com:") {
+			module_url = "https://github.com/" + strings.TrimPrefix(module_url, "git@github.com:")
+		}
+		module_parsed, err := url.Parse(module_url)
+		if err != nil {
+			return fmt.Errorf("invalid submodule URL for %s: %w", entry_path, err)
+		}
+		if !module_parsed.IsAbs() {
+			base_url, err := url.Parse(clone_url + "/")
+			if err != nil {
+				return err
+			}
+			module_parsed = base_url.ResolveReference(module_parsed)
+		}
+		if err := s.items_from_git_revision(module_parsed.String(), entry.Hash.String(), path.Join(dst_prefix, entry_path), true, active_revisions, yield); err != nil {
+			return fmt.Errorf("submodule %s: %w", entry_path, err)
 		}
 	}
 }
@@ -2407,11 +2503,11 @@ func normalize_github_url(src_url *url.URL) *url.URL {
 		Host:   src_url.Hostname(),
 		Path:   "/" + owner + "/" + repo,
 	}
+	query := src_url.Query()
 	if ref != "" {
-		query := url.Values{}
 		query.Set("ref", ref)
-		github_url.RawQuery = query.Encode()
 	}
+	github_url.RawQuery = query.Encode()
 	return github_url
 }
 
@@ -2798,6 +2894,8 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) (exit_code int) {
 		"-quiet":         true,
 		"-q":             true,
 		"-f":             true,
+		"-recursive":     true,
+		"--recursive":    true,
 	})...)
 
 	src := hx_src{}
@@ -2806,6 +2904,7 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) (exit_code int) {
 	keep_symlinks := true
 	quiet := false
 	overwrite := true
+	recursive := false
 
 	fs := flag.NewFlagSet(normalized_args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr_writer)
@@ -2826,6 +2925,7 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) (exit_code int) {
 	fs.Var(bool_flag{&quiet}, "quiet", "compatibility flag; output paths are always plain")
 	fs.Var(bool_flag{&quiet}, "q", "compatibility flag; output paths are always plain")
 	fs.Var(bool_flag{&overwrite}, "f", "overwrite files")
+	fs.Var(bool_flag{&recursive}, "recursive", "include git submodules for github sources")
 	if err := fs.Parse(normalized_args[1:]); err != nil {
 		return 2
 	}
@@ -2865,6 +2965,26 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) (exit_code int) {
 	}
 
 	src.url = parsed_args[0]
+	if recursive {
+		if src.download_only {
+			fmt.Fprintln(stderr_writer, "error: --recursive cannot be combined with --download-only")
+			return 2
+		}
+		source_url, _ := parse_src_url(src.url)
+		if source_url.Scheme != "github" && !is_github_http_url(source_url) {
+			fmt.Fprintln(stderr_writer, "error: --recursive is supported only for github sources")
+			return 2
+		}
+		parsed_source, err := url.Parse(src.url)
+		if err != nil {
+			fmt.Fprintf(stderr_writer, "error: invalid github source: %v\n", err)
+			return 2
+		}
+		query := parsed_source.Query()
+		query.Set("recursive", "1")
+		parsed_source.RawQuery = query.Encode()
+		src.url = parsed_source.String()
+	}
 	dst.src = src
 	dst.path = "."
 	if len(parsed_args) == 2 {
