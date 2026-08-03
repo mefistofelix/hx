@@ -75,7 +75,7 @@ assert_file "$tar_xz_root/out/README"
 
 zst_root="$tests_cache_dir/cli/zst"
 mkdir -p "$zst_root/out"
-run_hx "https://london.mirror.pkgbuild.com/core/os/x86_64/bash-5.3.9-1-x86_64.pkg.tar.zst" "$zst_root/out"
+run_hx "https://archive.archlinux.org/packages/b/bash/bash-5.3.15-1-x86_64.pkg.tar.zst" "$zst_root/out"
 assert_file "$zst_root/out/usr/bin/bash"
 assert_file "$zst_root/out/usr/share/doc/bash/README"
 
@@ -86,8 +86,12 @@ assert_file "$github_root/out/go.mod"
 
 github_schema_root="$tests_cache_dir/cli/github_schema"
 mkdir -p "$github_schema_root/out"
-run_hx "github://go-git/go-billy" "$github_schema_root/out"
+github_schema_output="$(run_hx "github://go-git/go-billy?ref=master" "$github_schema_root/out")"
 assert_file "$github_schema_root/out/go.mod"
+assert_contains "$github_schema_output" "$github_schema_root/out/go.mod"
+case "$github_schema_output" in
+    *"items="*|*"bytes="*|"file "*) fail "github output contains status counters or item types" ;;
+esac
 
 github_tree_root="$tests_cache_dir/cli/github_tree"
 mkdir -p "$github_tree_root/out"

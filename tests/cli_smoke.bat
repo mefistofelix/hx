@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 set "ROOT_DIR=%~dp0.."
 set "HX_EXE=%ROOT_DIR%\bin\hx.exe"
@@ -73,9 +73,10 @@ if defined LINK_TEST_READY (
         echo test failed: missing symlink %CASE_DIR%\out\src_link.txt
         exit /b 1
     )
-    for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-Item -LiteralPath ''%CASE_DIR%\out\src_link.txt'').Target"') do set "LINK_TARGET=%%I"
-    if /I not "%LINK_TARGET%"=="payload.txt" (
-        echo test failed: unexpected symlink target %LINK_TARGET%
+    set "HX_TEST_LINK=%CASE_DIR%\out\src_link.txt"
+    for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-Item -LiteralPath $env:HX_TEST_LINK).Target"') do set "LINK_TARGET=%%I"
+    if /I not "!LINK_TARGET!"=="payload.txt" (
+        echo test failed: unexpected symlink target !LINK_TARGET!
         exit /b 1
     )
 )
@@ -99,7 +100,7 @@ if not exist "%CASE_DIR%\out\README" (
 
 set "CASE_DIR=%TESTS_CACHE%\zst"
 mkdir "%CASE_DIR%\out" || exit /b 1
-"%HX_EXE%" -quiet "https://london.mirror.pkgbuild.com/core/os/x86_64/bash-5.3.9-1-x86_64.pkg.tar.zst" "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" -quiet "https://archive.archlinux.org/packages/b/bash/bash-5.3.15-1-x86_64.pkg.tar.zst" "%CASE_DIR%\out" || exit /b 1
 if not exist "%CASE_DIR%\out\usr\bin\bash" (
     echo test failed: missing file %CASE_DIR%\out\usr\bin\bash
     exit /b 1
@@ -120,9 +121,17 @@ if not exist "%CASE_DIR%\out\go.mod" (
 
 set "CASE_DIR=%TESTS_CACHE%\github_schema"
 mkdir "%CASE_DIR%\out" || exit /b 1
-"%HX_EXE%" -quiet "github://go-git/go-billy" "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" -quiet "github://go-git/go-billy?ref=master" "%CASE_DIR%\out" > "%CASE_DIR%\output.txt" || exit /b 1
 if not exist "%CASE_DIR%\out\go.mod" (
     echo test failed: missing file %CASE_DIR%\out\go.mod
+    exit /b 1
+)
+findstr /C:"github_schema\out\go.mod" "%CASE_DIR%\output.txt" >nul || (
+    echo test failed: output does not contain the destination file path
+    exit /b 1
+)
+findstr /C:"items=" /C:"bytes=" /B /C:"file " "%CASE_DIR%\output.txt" >nul && (
+    echo test failed: output contains status counters or item types
     exit /b 1
 )
 

@@ -58,7 +58,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 | `-platform OS/ARCH[/VARIANT]`, `-plat ...` | host-specific | Select the target platform for sources that use it |
 | `-registry VALUE`, `-reg VALUE` | auto | Override the registry or repository base for supported source types |
 | `-target VALUE`, `-t VALUE` | auto | Select a repository-specific target such as distro release or framework |
-| `-quiet 0|1`, `-q 0|1` | `0` | Use plain output instead of the ANSI status line |
+| `-quiet 0|1`, `-q 0|1` | `0` | Retained for compatibility; normal output is always one destination file path per line |
 | `-incexc RULES` | `:+` | Apply ordered include/exclude rules to extracted paths |
 | `-repath GLOBS` | empty | After `-incexc`, keep only items whose destination path suffix matches one of the glob or doublestar patterns, and rewrite the destination path to that matching suffix |
 | `-f 0|1` | `1` | Replace existing destination entries instead of leaving them untouched |
@@ -69,8 +69,9 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 - archives are extracted into `dest`
 - additional archive/compression formats such as `.7z`, `.rar`, `.xz`, `.bz2`, `.zst`, `.lz4`, `.br`, and related single-file compressed variants are handled through `mholt/archives`
 - plain files are copied into `dest`
-- Git sources are cloned to a temporary shallow worktree with depth 1 and copied without the `.git` directory
-- `github://owner/repository` clones the matching public GitHub repository; incomplete GitHub schema URLs report the required format
+- generic Git sources fetch the selected shallow revision into an in-memory bare object store and write its tree directly to `dest`, without a `.git` directory or temporary worktree
+- `github://owner/repository` downloads the requested branch or commit as a streaming tarball and removes GitHub's wrapper directory; use `?ref=branch-or-commit` to select a revision
+- if the GitHub archive cannot be downloaded or extracted, `hx` warns on stderr and automatically falls back to a shallow Git checkout of the same revision
 - `-repath` filters and rewrites the final destination path after `-incexc`; for example `-repath '**/osqueryi*'` keeps `osquery-5.22.1.windows_x86_64/Program Files/osquery/osqueryi.exe` as `osqueryi.exe` and drops non-matching items
 - `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`; with `-download-only`, it writes the manifest plus config/layer blobs instead
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
@@ -83,6 +84,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 - `apk://` fetches `APKINDEX.tar.gz`, resolves the selected package plus dependency providers for the requested repo and arch, then extracts or downloads the `.apk` artifacts
 - if HTTPS certificate verification fails, `hx` warns and retries insecurely
 - successful runs write a sentinel file in `dest`; the same source/options combination is skipped on the next run
+- successful files and links are printed as destination paths, one per line; directories, byte counters, item counters, and Git progress are not printed
 
 ## Examples
 
@@ -94,6 +96,7 @@ hx https://example.com/project.git ./out
 hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
 hx github://go-git/go-billy ./out
+hx 'github://true-async/php-src?ref=master' ./php-src
 hx docker://busybox:latest ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out

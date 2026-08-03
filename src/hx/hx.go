@@ -30,6 +30,8 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	gitmemory "github.com/go-git/go-git/v5/storage/memory"
 	"github.com/mholt/archives"
 	rpmutils "github.com/sassoftware/go-rpmutils"
 	yaml "github.com/yaml/go-yaml"
@@ -180,15 +182,14 @@ func (h *hx_tui) warn_once(key string, msg string) {
 }
 
 func (h *hx_tui) show_item(item hx_item) {
+	if item.type_name == "dir" {
+		return
+	}
 	h.item_count++
 	if item.size > 0 {
 		h.total_bytes += item.size
 	}
-	if h.mode == "plain" {
-		fmt.Fprintf(stdout_writer, "%s %s\n", item.type_name, item.dst_full_path)
-		return
-	}
-	fmt.Fprintf(stdout_writer, "\ritems=%d bytes=%d last=%s", h.item_count, h.total_bytes, item.dst_full_path)
+	fmt.Fprintln(stdout_writer, item.dst_full_path)
 }
 
 // -----------------------------------------------------------------------------
@@ -210,10 +211,28 @@ func (s hx_src) items(yield func(hx_item) bool) error {
 	case "git":
 		return s.items_from_git(src_url.String(), src_url.Query().Get("ref"), yield)
 	case "github":
-		clone_url, err := github_clone_url(src_url)
+		archive_url, clone_url, err := github_urls(src_url)
 		if err != nil {
 			return err
 		}
+		if s.download_only {
+			return s.items_from_http(archive_url, yield)
+		}
+		archive_err := s.items_from_http(archive_url, func(item hx_item) bool {
+			parts := strings.SplitN(item.src_full_path, "/", 2)
+			if len(parts) != 2 || parts[1] == "" {
+				if item.src_stream != nil {
+					_ = item.src_stream.Close()
+				}
+				return true
+			}
+			item.src_full_path = parts[1]
+			return yield(item)
+		})
+		if archive_err == nil {
+			return nil
+		}
+		fmt.Fprintf(stderr_writer, "warning: github archive download failed, falling back to git: %v\n", archive_err)
 		return s.items_from_git(clone_url, src_url.Query().Get("ref"), yield)
 	case "pypi":
 		return s.items_from_pypi(src_url, yield)
@@ -243,6 +262,14 @@ func (s hx_src) items_from_local(local_path string, yield func(hx_item) bool) er
 	}
 	if info.IsDir() {
 		return walk_local_dir(local_path, false, s.url, yield)
+	}
+	if info.Mode()&os.ModeSymlink != 0 && !s.download_only {
+		item, err := local_fs_item(local_path, filepath.Base(local_path), s.url)
+		if err != nil {
+			return err
+		}
+		yield(item)
+		return nil
 	}
 	if s.download_only {
 		file, err := os.Open(local_path)
@@ -329,12 +356,78 @@ func (s hx_src) items_from_git(clone_url string, ref string, yield func(hx_item)
 	if s.download_only {
 		return errors.New("download-only is not implemented for git sources")
 	}
-	work_dir, err := clone_git_repo(clone_url, ref)
+	clone_opts := &git.CloneOptions{
+		URL:      clone_url,
+		Depth:    1,
+		Progress: io.Discard,
+	}
+	if ref != "" && !hex_hash_rx.MatchString(ref) {
+		clone_opts.ReferenceName = plumbing.NewBranchReferenceName(ref)
+		clone_opts.SingleBranch = true
+	}
+	repo, err := git.Clone(gitmemory.NewStorage(), nil, clone_opts)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(work_dir)
-	return walk_local_dir(work_dir, true, clone_url, yield)
+	commit_hash := plumbing.ZeroHash
+	if ref != "" && hex_hash_rx.MatchString(ref) {
+		commit_hash = plumbing.NewHash(ref)
+	} else {
+		head, err := repo.Head()
+		if err != nil {
+			return err
+		}
+		commit_hash = head.Hash()
+	}
+	commit, err := repo.CommitObject(commit_hash)
+	if err != nil {
+		return err
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return err
+	}
+	files := tree.Files()
+	defer files.Close()
+	for {
+		file, err := files.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if file.Mode == filemode.Submodule {
+			continue
+		}
+		item := hx_item{
+			type_name:      "file",
+			src_url:        clone_url,
+			src_full_path:  file.Name,
+			size_extracted: file.Size,
+			size:           file.Size,
+		}
+		if file.Mode == filemode.Symlink {
+			link_path, err := file.Contents()
+			if err != nil {
+				return err
+			}
+			item.type_name = "link"
+			item.src_link_path = link_path
+			item.size = 0
+		} else {
+			item.src_stream, err = file.Reader()
+			if err != nil {
+				return err
+			}
+		}
+		if !yield(item) {
+			if item.src_stream != nil {
+				_ = item.src_stream.Close()
+			}
+			return nil
+		}
+	}
 }
 
 func (s hx_src) items_from_pypi(src_url *url.URL, yield func(hx_item) bool) error {
@@ -1526,12 +1619,12 @@ func (d hx_dst) copy() error {
 
 		item.dst_full_path = filepath.Join(d.path, filepath.FromSlash(dst_rel_path))
 		kept_paths[dst_rel_path] = true
-		d.tui.show_item(item)
 		if err := d.copy_item(item); err != nil {
 			d.tui.warn(err.Error())
 			copy_err = err
 			return false
 		}
+		d.tui.show_item(item)
 		return true
 	}); err != nil {
 		return err
@@ -1543,9 +1636,6 @@ func (d hx_dst) copy() error {
 		return err
 	}
 
-	if d.tui.mode != "plain" && d.tui.item_count > 0 {
-		fmt.Fprintln(stdout_writer)
-	}
 	return nil
 }
 
@@ -1806,47 +1896,6 @@ func walk_local_dir(local_path string, skip_git_dir bool, src_url string, yield 
 		}
 		return nil
 	})
-}
-
-// clone_git_repo materializes the repo once so the rest of the pipeline stays path-based.
-func clone_git_repo(clone_url string, ref string) (string, error) {
-	work_dir, err := os.MkdirTemp("", "hx-git-*")
-	if err != nil {
-		return "", err
-	}
-	clone_opts := &git.CloneOptions{
-		URL:      clone_url,
-		Depth:    1,
-		Progress: io.Discard,
-	}
-	if ref != "" && !hex_hash_rx.MatchString(ref) {
-		clone_opts.ReferenceName = plumbing.NewBranchReferenceName(ref)
-		clone_opts.SingleBranch = true
-	}
-	_, err = git.PlainClone(work_dir, false, clone_opts)
-	if err != nil {
-		os.RemoveAll(work_dir)
-		return "", err
-	}
-	if ref == "" || !hex_hash_rx.MatchString(ref) {
-		return work_dir, nil
-	}
-	repo, err := git.PlainOpen(work_dir)
-	if err != nil {
-		os.RemoveAll(work_dir)
-		return "", err
-	}
-	worktree, err := repo.Worktree()
-	if err != nil {
-		os.RemoveAll(work_dir)
-		return "", err
-	}
-	checkout_opts := &git.CheckoutOptions{Hash: plumbing.NewHash(ref)}
-	if err := worktree.Checkout(checkout_opts); err != nil {
-		os.RemoveAll(work_dir)
-		return "", err
-	}
-	return work_dir, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -2366,28 +2415,38 @@ func normalize_github_url(src_url *url.URL) *url.URL {
 	return github_url
 }
 
-func github_clone_url(src_url *url.URL) (string, error) {
+func github_urls(src_url *url.URL) (*url.URL, string, error) {
 	parts := split_clean_path(src_url.Path)
 	owner := src_url.Hostname()
 	if strings.EqualFold(owner, github_host) {
 		if len(parts) != 2 {
-			return "", errors.New("github source requires github://owner/repository")
+			return nil, "", errors.New("github source requires github://owner/repository")
 		}
 		owner = parts[0]
 		parts = parts[1:]
 	}
 	if owner == "" || len(parts) != 1 || parts[0] == "" {
-		return "", errors.New("github source requires github://owner/repository")
+		return nil, "", errors.New("github source requires github://owner/repository")
 	}
 	repo := strings.TrimSuffix(parts[0], git_suffix)
 	if repo == "" {
-		return "", errors.New("github source requires a repository name")
+		return nil, "", errors.New("github source requires a repository name")
 	}
-	return (&url.URL{
+	ref := src_url.Query().Get("ref")
+	if ref == "" {
+		ref = "HEAD"
+	}
+	archive_url := &url.URL{
+		Scheme: "https",
+		Host:   github_host,
+		Path:   path.Join(owner, repo, "archive", ref+tar_gz_suffixes[0]),
+	}
+	clone_url := (&url.URL{
 		Scheme: "https",
 		Host:   github_host,
 		Path:   path.Join(owner, repo) + git_suffix,
-	}).String(), nil
+	}).String()
+	return archive_url, clone_url, nil
 }
 
 func split_clean_path(raw_path string) []string {
@@ -2764,8 +2823,8 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) (exit_code int) {
 	fs.Var(bool_flag{&src.download_only}, "do", "download without extraction")
 	fs.Var(bool_flag{&src.force_no_tmp}, "notmp", "avoid temp-file fallback")
 	fs.Var(bool_flag{&src.force_no_tmp}, "no-tempfile", "avoid temp-file fallback")
-	fs.Var(bool_flag{&quiet}, "quiet", "plain output")
-	fs.Var(bool_flag{&quiet}, "q", "plain output")
+	fs.Var(bool_flag{&quiet}, "quiet", "compatibility flag; output paths are always plain")
+	fs.Var(bool_flag{&quiet}, "q", "compatibility flag; output paths are always plain")
 	fs.Var(bool_flag{&overwrite}, "f", "overwrite files")
 	if err := fs.Parse(normalized_args[1:]); err != nil {
 		return 2
