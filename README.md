@@ -29,7 +29,7 @@ hx [flags] <source> [dest]
 
 `dest` defaults to the current directory.
 
-Running `hx` without a source prints a short example for every supported source scheme.
+Running `hx` without a source prints a short example for every supported source scheme. Invalid flags, source URLs, and source-specific arguments exit with a readable `error:` message instead of a stack trace.
 
 ## Embedding
 
@@ -66,6 +66,7 @@ This is intended for projects that want to reuse `hx` in-process instead of spaw
 - additional archive/compression formats such as `.7z`, `.rar`, `.xz`, `.bz2`, `.zst`, `.lz4`, `.br`, and related single-file compressed variants are handled through `mholt/archives`
 - plain files are copied into `dest`
 - Git sources are cloned to a temporary shallow worktree with depth 1 and copied without the `.git` directory
+- `github://owner/repository` clones the matching public GitHub repository; incomplete GitHub schema URLs report the required format
 - `-repath` filters and rewrites the final destination path after `-incexc`; for example `-repath '**/osqueryi*'` keeps `osquery-5.22.1.windows_x86_64/Program Files/osquery/osqueryi.exe` as `osqueryi.exe` and drops non-matching items
 - `docker://` fetches the image manifest from the registry API, downloads the selected layers, and applies them to a temporary rootfs before copying to `dest`; with `-download-only`, it writes the manifest plus config/layer blobs instead
 - `pypi://` downloads the package metadata, prefers the source distribution when available, then extracts or downloads the selected artifact
@@ -115,6 +116,8 @@ chmod +x build.sh && ./build.sh
 ```
 
 Build outputs are written to `bin/`.
+
+Tagged GitHub Releases include `hx-windows-amd64.zip` and `hx-linux-amd64.tar.gz`.
 
 ## Test
 
