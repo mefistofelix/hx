@@ -32,6 +32,11 @@ run_hx() {
 rm -rf "$tests_cache_dir/cli"
 mkdir -p "$tests_cache_dir/cli"
 
+if "$hx_bin" >"$tests_cache_dir/cli/no-arguments.txt" 2>&1; then
+    fail "missing source unexpectedly succeeded"
+fi
+assert_contains "$(cat "$tests_cache_dir/cli/no-arguments.txt")" "examples:"
+
 local_root="$tests_cache_dir/cli/local"
 mkdir -p "$local_root/out"
 printf 'plain\n' >"$local_root/payload.txt"
@@ -78,6 +83,11 @@ github_root="$tests_cache_dir/cli/github"
 mkdir -p "$github_root/out"
 run_hx "https://github.com/go-git/go-billy" "$github_root/out"
 assert_file "$github_root/out/go.mod"
+
+github_schema_root="$tests_cache_dir/cli/github_schema"
+mkdir -p "$github_schema_root/out"
+run_hx "github://go-git/go-billy" "$github_schema_root/out"
+assert_file "$github_schema_root/out/go.mod"
 
 github_tree_root="$tests_cache_dir/cli/github_tree"
 mkdir -p "$github_tree_root/out"

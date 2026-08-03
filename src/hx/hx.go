@@ -210,7 +210,11 @@ func (s hx_src) items(yield func(hx_item) bool) error {
 	case "git":
 		return s.items_from_git(src_url.String(), src_url.Query().Get("ref"), yield)
 	case "github":
-		return s.items_from_git(github_clone_url(src_url), src_url.Query().Get("ref"), yield)
+		clone_url, err := github_clone_url(src_url)
+		if err != nil {
+			return err
+		}
+		return s.items_from_git(clone_url, src_url.Query().Get("ref"), yield)
 	case "pypi":
 		return s.items_from_pypi(src_url, yield)
 	case "nuget":
@@ -2362,15 +2366,28 @@ func normalize_github_url(src_url *url.URL) *url.URL {
 	return github_url
 }
 
-func github_clone_url(src_url *url.URL) string {
+func github_clone_url(src_url *url.URL) (string, error) {
 	parts := split_clean_path(src_url.Path)
-	owner := parts[0]
-	repo := strings.TrimSuffix(parts[1], git_suffix)
+	owner := src_url.Hostname()
+	if strings.EqualFold(owner, github_host) {
+		if len(parts) != 2 {
+			return "", errors.New("github source requires github://owner/repository")
+		}
+		owner = parts[0]
+		parts = parts[1:]
+	}
+	if owner == "" || len(parts) != 1 || parts[0] == "" {
+		return "", errors.New("github source requires github://owner/repository")
+	}
+	repo := strings.TrimSuffix(parts[0], git_suffix)
+	if repo == "" {
+		return "", errors.New("github source requires a repository name")
+	}
 	return (&url.URL{
 		Scheme: "https",
-		Host:   src_url.Host,
+		Host:   github_host,
 		Path:   path.Join(owner, repo) + git_suffix,
-	}).String()
+	}).String(), nil
 }
 
 func split_clean_path(raw_path string) []string {
@@ -2700,12 +2717,18 @@ func has_suffix_fold(raw_value string, suffixes ...string) bool {
 // CLI
 // -----------------------------------------------------------------------------
 
-func Main(args []string, stdout io.Writer, stderr io.Writer) int {
+func Main(args []string, stdout io.Writer, stderr io.Writer) (exit_code int) {
 	if len(args) == 0 {
 		args = []string{"hx"}
 	}
 	stdout_writer = stdout
 	stderr_writer = stderr
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			fmt.Fprintf(stderr_writer, "error: invalid arguments or source: %v\n", recovered)
+			exit_code = 2
+		}
+	}()
 
 	normalized_args := append([]string{args[0]}, normalize_bool_flag_args(args[1:], map[string]bool{
 		"-symlinks":      true,
@@ -2758,6 +2781,27 @@ func Main(args []string, stdout io.Writer, stderr io.Writer) int {
 	parsed_args := fs.Args()
 	if len(parsed_args) < 1 || len(parsed_args) > 2 {
 		fmt.Fprintln(stderr_writer, "usage: hx [flags] <source> [dest]")
+		if len(parsed_args) == 0 {
+			fmt.Fprintln(stderr_writer, "examples:")
+			for _, example := range []string{
+				"  hx ./archive.zip ./out",
+				"  hx file:///path/to/archive.tar.gz ./out",
+				"  hx https://example.com/archive.tar.gz ./out",
+				"  hx https://example.com/repository.git ./out",
+				"  hx git://example.com/repository.git ./out",
+				"  hx github://owner/repository ./out",
+				"  hx docker://busybox:latest ./out",
+				"  hx pypi://requests ./out",
+				"  hx nuget://Newtonsoft.Json ./out",
+				"  hx winget://Git.Git ./out",
+				"  hx npm://lodash ./out",
+				"  hx apt://curl ./out",
+				"  hx rpm://jq ./out",
+				"  hx apk://curl ./out",
+			} {
+				fmt.Fprintln(stderr_writer, example)
+			}
+		}
 		return 2
 	}
 

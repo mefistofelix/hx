@@ -17,7 +17,7 @@ hx [flags] <source> [dest]
 - `http://` and `https://` file/archive URLs
 - `http://` and `https://` Git repository URLs ending in `.git`
 - `git://` repository URLs
-- GitHub repository URLs only when the path is exactly `https://github.com/owner/repo` or `.../(tree|commit)/...`; other GitHub URLs such as release assets remain plain HTTP(S) archive/file URLs
+- GitHub repository URLs only when the path is exactly `https://github.com/owner/repo` or `.../(tree|commit)/...`, plus `github://owner/repository`; other GitHub URLs such as release assets remain plain HTTP(S) archive/file URLs
 - `docker://image[:tag]` image sources
 - `pypi://package` and `pypi://package@version` sources
 - `nuget://package` and `nuget://package@version` sources
@@ -28,6 +28,8 @@ hx [flags] <source> [dest]
 - `apk://package` and `apk://package@version` sources
 
 `dest` defaults to the current directory.
+
+Running `hx` without a source prints a short example for every supported source scheme.
 
 ## Embedding
 
@@ -85,6 +87,7 @@ hx https://example.com/project.tar.gz ./out
 hx https://example.com/project.git ./out
 hx https://github.com/go-git/go-billy ./out
 hx https://github.com/go-git/go-billy/tree/master ./out
+hx github://go-git/go-billy ./out
 hx docker://busybox:latest ./out
 hx -registry https://pypi.org pypi://requests@2.32.3 ./out
 hx -registry https://api.nuget.org nuget://Newtonsoft.Json@13.0.3 ./out

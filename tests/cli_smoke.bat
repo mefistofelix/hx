@@ -10,6 +10,16 @@ if not exist "%HX_EXE%" (
     exit /b 1
 )
 
+"%HX_EXE%" > "%TEMP%\hx-no-arguments.txt" 2>&1
+if not errorlevel 1 (
+    echo test failed: missing source unexpectedly succeeded
+    exit /b 1
+)
+findstr /C:"examples:" "%TEMP%\hx-no-arguments.txt" >nul || (
+    echo test failed: missing no-argument examples
+    exit /b 1
+)
+
 if exist "%TESTS_CACHE%" rmdir /s /q "%TESTS_CACHE%"
 mkdir "%TESTS_CACHE%" || exit /b 1
 
@@ -103,6 +113,14 @@ if errorlevel 1 (
 set "CASE_DIR=%TESTS_CACHE%\github"
 mkdir "%CASE_DIR%\out" || exit /b 1
 "%HX_EXE%" -quiet "https://github.com/go-git/go-billy" "%CASE_DIR%\out" || exit /b 1
+if not exist "%CASE_DIR%\out\go.mod" (
+    echo test failed: missing file %CASE_DIR%\out\go.mod
+    exit /b 1
+)
+
+set "CASE_DIR=%TESTS_CACHE%\github_schema"
+mkdir "%CASE_DIR%\out" || exit /b 1
+"%HX_EXE%" -quiet "github://go-git/go-billy" "%CASE_DIR%\out" || exit /b 1
 if not exist "%CASE_DIR%\out\go.mod" (
     echo test failed: missing file %CASE_DIR%\out\go.mod
     exit /b 1
